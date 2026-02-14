@@ -1,0 +1,17 @@
+[package]
+name = "moleucle_3dview_rs"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight 3D molecule visualization library utilizing the graphics crate."
+license = "MIT"
+repository = "https://github.com/taman/moleucle_3dview_rs"
+keywords = ["molecule", "visualization", "3d", "graphics", "bioinformatics"]
+categories = ["visualization", "science"]
+
+[dependencies]
+bio_files = "0.4.6"
+eframe = "0.33.3"
+egui = "0.33.3"
+graphics = "0.5.9"
+lin_alg = "1.3.14"
+nalgebra = "0.34.1"
