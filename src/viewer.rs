@@ -1,4 +1,5 @@
 use crate::molecule::Molecule;
+use crate::AdditionalRender;
 use graphics::{Entity, Mesh, Scene};
 use lin_alg::f32::{Quaternion, Vec3};
 
@@ -12,6 +13,7 @@ pub enum ViewerEvent {
 pub struct MoleculeViewer {
     pub molecule: Option<Molecule>,
     pub dirty: bool,
+    pub additional_render: Option<Box<dyn AdditionalRender>>,
 }
 
 impl MoleculeViewer {
@@ -19,6 +21,7 @@ impl MoleculeViewer {
         Self {
             molecule: None,
             dirty: false,
+            additional_render: None,
         }
     }
 
@@ -215,6 +218,10 @@ impl MoleculeViewer {
                 );
                 entity.scale_partial = Some(scale_partial);
                 scene.entities.push(entity);
+            }
+
+            if let Some(additional_render) = &self.additional_render {
+                additional_render.update_scene(scene, mol);
             }
         }
     }

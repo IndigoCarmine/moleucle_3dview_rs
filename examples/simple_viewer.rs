@@ -1,5 +1,7 @@
 use graphics::{run, EngineUpdates, EntityUpdate, GraphicsSettings, Scene, UiSettings};
-use moleucle_3dview_rs::{viewer::ViewerEvent, CameraController, Molecule, MoleculeViewer};
+use moleucle_3dview_rs::{
+    viewer::ViewerEvent, CameraController, Molecule, MoleculeViewer, SelectedAtomRender,
+};
 use std::path::Path;
 
 fn main() {
@@ -19,6 +21,9 @@ fn main() {
     } else {
         eprintln!("Benzene.mol2 not found at {:?}", std::env::current_dir());
     }
+
+    let selected_atom_render = SelectedAtomRender::new();
+    viewer.additional_render = Some(Box::new(selected_atom_render));
 
     // 2. Initialize Scene
     let mut scene = Scene::default();
@@ -61,10 +66,15 @@ fn main() {
             let (picked, updates) = controller.handle_event(&event, scene, viewer);
 
             if let Some(event) = picked {
-                match event {
+                match &event {
                     ViewerEvent::AtomClicked(i) => println!("Main Trace: Atom {} Clicked", i),
                     ViewerEvent::BondClicked(i) => println!("Main Trace: Bond {} Clicked", i),
                     ViewerEvent::NothingClicked => println!("Main Trace: Nothing Clicked"),
+                }
+
+                if let Some(render) = &mut viewer.additional_render {
+                    render.handle_event(&event);
+                    viewer.dirty = true;
                 }
             }
 

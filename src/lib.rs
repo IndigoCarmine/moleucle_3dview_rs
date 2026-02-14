@@ -24,11 +24,13 @@
 //! }
 //! ```
 
+pub mod additional_render;
 pub mod camera;
 pub mod controller;
 pub mod molecule;
 pub mod viewer;
 
+pub use additional_render::{AdditionalRender, SelectedAtomRender};
 pub use camera::Camera;
 pub use controller::CameraController;
 pub use molecule::Molecule;
