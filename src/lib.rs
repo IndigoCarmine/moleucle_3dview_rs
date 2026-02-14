@@ -25,9 +25,11 @@
 //! ```
 
 pub mod camera;
+pub mod controller;
 pub mod molecule;
 pub mod viewer;
 
 pub use camera::Camera;
+pub use controller::CameraController;
 pub use molecule::Molecule;
 pub use viewer::MoleculeViewer;

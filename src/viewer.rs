@@ -12,7 +12,6 @@ pub enum ViewerEvent {
 pub struct MoleculeViewer {
     pub molecule: Option<Molecule>,
     pub dirty: bool,
-    pub last_mouse_pos: (f32, f32),
 }
 
 impl MoleculeViewer {
@@ -20,17 +19,12 @@ impl MoleculeViewer {
         Self {
             molecule: None,
             dirty: false,
-            last_mouse_pos: (0.0, 0.0),
         }
     }
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
         self.molecule = Some(molecule);
         self.dirty = true;
-    }
-
-    pub fn on_mouse_move(&mut self, pos: (f32, f32)) {
-        self.last_mouse_pos = pos;
     }
 
     pub fn pick(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<ViewerEvent> {

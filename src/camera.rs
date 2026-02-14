@@ -119,37 +119,93 @@ impl Camera {
     pub fn rotate_orbit(&mut self, delta_x: f32, delta_y: f32) {
         let to_pos = self.position - self.target;
 
-        // Rotate around Y axis (yaw)
-        let rot_y = nalgebra::Rotation3::from_axis_angle(&Vector3::y_axis(), -delta_x);
-        let to_pos = rot_y * to_pos;
-
-        // Rotate around local X axis (pitch)
+        // 1. Calculate local axes based on current orientation
         let fwd = -to_pos.normalize();
         let right = fwd.cross(&self.up).normalize();
+        // Recalculate up to ensure it is perfectly orthogonal to fwd and right
+        let local_up = right.cross(&fwd).normalize();
+
+        // 2. Horizontal rotation (around current camera UP)
+        let rot_y =
+            nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(local_up), delta_x);
+        let mut to_pos = rot_y * to_pos;
+        let mut new_up = rot_y * local_up;
+
+        // 3. Vertical rotation (around current camera RIGHT)
+        let fwd = -to_pos.normalize();
+        let right = fwd.cross(&new_up).normalize();
         let rot_x =
             nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(right), -delta_y);
-        let to_pos = rot_x * to_pos;
+
+        to_pos = rot_x * to_pos;
+        new_up = rot_x * new_up;
 
         self.position = self.target + to_pos;
+        self.up = new_up;
     }
-    pub fn translate(&mut self, delta: Vector3<f32>) {
-        self.position += delta;
-        self.target += delta;
+
+    pub fn dolly(&mut self, delta: f32) {
+        let dir = self.target - self.position;
+        let dist = dir.magnitude();
+        let new_dist = (dist - delta).max(1.0); // Prevent zooming past target
+        self.position = self.target - dir.normalize() * new_dist;
     }
 
     pub fn pan(&mut self, delta: Vector2<f32>) {
         let fwd = (self.target - self.position).normalize();
         let right = fwd.cross(&self.up).normalize();
-        let up = right.cross(&fwd).normalize();
+        let local_up = right.cross(&fwd).normalize();
 
         // Adjust pan speed based on zoom/distance
         let factor = match self.projection_type {
-            ProjectionType::Perspective => (self.position - self.target).magnitude() * 0.5, // Heuristic
-            ProjectionType::Orthographic => self.ortho_scale * 0.5,
+            ProjectionType::Perspective => (self.position - self.target).magnitude() * 0.001, // Adjusted heuristic
+            ProjectionType::Orthographic => self.ortho_scale * 0.001,
         };
 
-        let movement = right * -delta.x * factor + up * delta.y * factor;
+        let movement = right * delta.x * factor + local_up * delta.y * factor;
         self.position += movement;
         self.target += movement;
+        self.up = local_up; // Ensure up stays orthogonal
+    }
+
+    /// Generates a ray for picking.
+    /// u, v: screen coordinates in pixels.
+    /// width, height: viewport dimensions in pixels.
+    pub fn ray_from_screen(
+        &self,
+        u: f32,
+        v: f32,
+        width: f32,
+        height: f32,
+    ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
+        let ndc_x = 2.0 * u / width - 1.0;
+        let ndc_y = 1.0 - 2.0 * v / height;
+
+        let fwd = (self.target - self.position).normalize();
+        let right = fwd.cross(&self.up).normalize();
+        let local_up = right.cross(&fwd).normalize();
+
+        let ray_dir = match self.projection_type {
+            ProjectionType::Perspective => {
+                let tan_fov = (self.fov * 0.5).tan();
+                (fwd + right * ndc_x * self.aspect * tan_fov + local_up * ndc_y * tan_fov)
+                    .normalize()
+            }
+            ProjectionType::Orthographic => fwd,
+        };
+
+        let ray_origin = match self.projection_type {
+            ProjectionType::Perspective => self.position,
+            ProjectionType::Orthographic => {
+                let w = self.ortho_scale * self.aspect;
+                let h = self.ortho_scale;
+                self.position + right * ndc_x * (w * 0.5) + local_up * ndc_y * (h * 0.5)
+            }
+        };
+
+        (
+            lin_alg::f32::Vec3::new(ray_origin.x, ray_origin.y, ray_origin.z),
+            lin_alg::f32::Vec3::new(ray_dir.x, ray_dir.y, ray_dir.z),
+        )
     }
 }

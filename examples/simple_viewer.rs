@@ -1,14 +1,11 @@
-use graphics::{
-    ControlScheme, EngineUpdates, EntityUpdate, GraphicsSettings, Scene, UiSettings, run,
-    winit::event::{ElementState, MouseButton, WindowEvent},
-};
-use lin_alg::f32::Vec3;
-use moleucle_3dview_rs::{Molecule, MoleculeViewer, viewer::ViewerEvent};
+use graphics::{run, EngineUpdates, EntityUpdate, GraphicsSettings, Scene, UiSettings};
+use moleucle_3dview_rs::{viewer::ViewerEvent, CameraController, Molecule, MoleculeViewer};
 use std::path::Path;
 
 fn main() {
-    // 1. Initialize Viewer State
+    // 1. Initialize State
     let mut viewer = MoleculeViewer::new();
+    let mut controller = CameraController::new();
 
     // Load default molecule
     let path = Path::new("Benzene.mol2");
@@ -26,74 +23,55 @@ fn main() {
     // 2. Initialize Scene
     let mut scene = Scene::default();
 
-    // Configure Camera
-    scene.camera.position = Vec3::new(0.0, 0.0, -10.0);
-    // ControlScheme::Arc centers around 'center'
-    scene.input_settings.control_scheme = ControlScheme::Arc {
-        center: Vec3::new(0.0, 0.0, 0.0),
-    };
+    // Sync initial camera state
+    controller.camera.position = nalgebra::Point3::new(0.0, 0.0, -10.0);
+    controller.update_scene_camera(&mut scene);
 
-    // 3. Initial Mesh Generation
+    // Initial Mesh Generation
     viewer.update_scene(&mut scene);
 
-    // 4. Settings
-    let ui_settings = UiSettings::default();
-    let graphics_settings = GraphicsSettings::default();
-
-    // 5. Run Application
+    // 3. Run Application
     run(
-        viewer,
+        // We need to pass both viewer and controller.
+        // We can wrap them in a tuple or a struct.
+        (viewer, controller),
         scene,
-        ui_settings,
-        graphics_settings,
+        UiSettings::default(),
+        GraphicsSettings::default(),
         // Render Handler
-        |viewer, scene, _dt| {
+        |(viewer, controller), scene, _dt| {
+            let mut updates = EngineUpdates::default();
+
             if viewer.dirty {
                 viewer.update_scene(scene);
-                EngineUpdates {
-                    meshes: true,
-                    entities: EntityUpdate::All,
-                    ..Default::default()
-                }
-            } else {
-                EngineUpdates::default()
+                updates.meshes = true;
+                updates.entities = EntityUpdate::All;
             }
+
+            // Controller handles camera info generation
+            controller.update_scene_camera(scene);
+            updates.camera = true;
+
+            updates
         },
         // Device Event Handler
-        |_viewer, _event, _scene, _is_synthetic, _dt| EngineUpdates::default(),
+        |_state, _event, _scene, _is_synthetic, _dt| EngineUpdates::default(),
         // Window Event Handler
-        |viewer, event, scene, _dt| {
-            match event {
-                WindowEvent::CursorMoved { position, .. } => {
-                    viewer.on_mouse_move((position.x as f32, position.y as f32));
-                }
-                WindowEvent::MouseInput { state, button, .. } => {
-                    if state == ElementState::Pressed && button == MouseButton::Left {
-                        // Perform picking
-                        let (near, far) = scene.screen_to_render(viewer.last_mouse_pos);
-                        let dir = (far - near).to_normalized();
+        |(viewer, controller), event, scene, _dt| {
+            let (picked, updates) = controller.handle_event(&event, scene, viewer);
 
-                        if let Some(event) = viewer.pick(near, dir) {
-                            match event {
-                                ViewerEvent::AtomClicked(i) => {
-                                    println!("Callback: Atom {} Clicked", i)
-                                }
-                                ViewerEvent::BondClicked(i) => {
-                                    println!("Callback: Bond {} Clicked", i)
-                                }
-                                ViewerEvent::NothingClicked => {
-                                    println!("Callback: Nothing Clicked")
-                                }
-                            }
-                        }
-                    }
+            if let Some(event) = picked {
+                match event {
+                    ViewerEvent::AtomClicked(i) => println!("Main Trace: Atom {} Clicked", i),
+                    ViewerEvent::BondClicked(i) => println!("Main Trace: Bond {} Clicked", i),
+                    ViewerEvent::NothingClicked => println!("Main Trace: Nothing Clicked"),
                 }
-                _ => {}
             }
-            EngineUpdates::default()
+
+            updates
         },
         // GUI Handler
-        |viewer, ctx, scene| {
+        |(viewer, _controller), ctx, _scene| {
             egui::Window::new("Controls").show(ctx, |ui| {
                 ui.label("Molecule Viewer");
                 if let Some(mol) = &viewer.molecule {
@@ -101,16 +79,12 @@ fn main() {
                     ui.label(format!("Bonds: {}", mol.bonds.len()));
                 }
 
-                if ui.button("Reset Camera").clicked() {
-                    scene.camera.position = Vec3::new(0.0, 0.0, -10.0);
-                    // Resetting look_at might require more logic depending on camera implementation
-                    // But usually setting position and having Arc scheme is enough to reset view relative to center.
-                    return EngineUpdates {
-                        camera: true,
-                        ..Default::default()
-                    };
-                }
-                EngineUpdates::default()
+                ui.separator();
+                ui.label("Controls:");
+                ui.label("Right Click: Orbit");
+                ui.label("Middle Click: Pan");
+                ui.label("Scroll: Zoom");
+                ui.label("Left Click: Select");
             });
             EngineUpdates::default()
         },
