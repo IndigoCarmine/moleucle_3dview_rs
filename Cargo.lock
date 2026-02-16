@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "moleucle_3dview_rs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bio_files",
  "eframe",
