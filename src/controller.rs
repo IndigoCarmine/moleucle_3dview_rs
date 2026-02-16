@@ -24,16 +24,21 @@ pub struct CameraController<T: Camera + Default> {
 
 impl<T: Camera + Default> CameraController<T> {
     pub fn new() -> Self {
+        let width = 800.0;
+        let height = 600.0;
+        let mut camera = T::default();
+        camera.set_aspect(width / height);
+
         Self {
-            camera: Box::new(T::default()),
+            camera: Box::new(camera),
             last_mouse_pos: Point2::origin(),
             mouse_lb_pressed: false,
             mouse_mb_pressed: false,
             mouse_rb_pressed: false,
             shift_pressed: false,
             ctrl_pressed: false,
-            width: 800.0,
-            height: 600.0,
+            width,
+            height,
         }
     }
 
@@ -148,7 +153,7 @@ impl<T: Camera + Default> CameraController<T> {
             lin_alg::f32::Vec3::new(fwd.x, fwd.y, fwd.z),
         );
 
-        scene.camera.fov_y = self.camera.fov();
+        scene.camera.fov_y = self.camera.fov_y();
         scene.camera.near = self.camera.near();
         scene.camera.far = self.camera.far();
         // Aspect
