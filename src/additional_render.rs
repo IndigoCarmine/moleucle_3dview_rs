@@ -1,7 +1,4 @@
-use std::cell::RefCell;
-use std::marker::Copy;
 use crate::molecule::Molecule;
-use crate::viewer::ViewerEvent;
 use graphics::{Entity, Mesh, Scene};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;

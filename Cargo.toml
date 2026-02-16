@@ -12,6 +12,7 @@ categories = ["visualization", "science"]
 bio_files = "0.4.6"
 eframe = "0.33.3"
 egui = "0.33.3"
+egui-wgpu = "0.33.3"
 graphics = "0.5.9"
 lin_alg = "1.3.14"
 nalgebra = "0.34.1"

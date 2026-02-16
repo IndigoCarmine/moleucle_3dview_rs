@@ -2469,6 +2469,7 @@ dependencies = [
  "bio_files",
  "eframe",
  "egui",
+ "egui-wgpu",
  "graphics",
  "lin_alg",
  "nalgebra 0.34.1",
