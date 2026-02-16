@@ -1,6 +1,6 @@
 use graphics::{run, EngineUpdates, EntityUpdate, GraphicsSettings, Scene, UiSettings};
 use moleucle_3dview_rs::{
-    viewer::ViewerEvent, CameraController, Molecule, MoleculeViewer, SelectedAtomRender,
+    CameraController, Molecule, MoleculeViewer, SelectedAtomRender, additional_render, viewer::ViewerEvent
 };
 use std::path::Path;
 
@@ -22,8 +22,7 @@ fn main() {
         eprintln!("Benzene.mol2 not found at {:?}", std::env::current_dir());
     }
 
-    let selected_atom_render = SelectedAtomRender::new();
-    viewer.additional_render = Some(Box::new(selected_atom_render));
+    viewer.additional_render = Some(Box::new(SelectedAtomRender::new()));
 
     // 2. Initialize Scene
     let mut scene = Scene::default();
@@ -67,21 +66,23 @@ fn main() {
 
             if let Some(event) = picked {
                 match &event {
-                    ViewerEvent::AtomClicked(i) => println!("Main Trace: Atom {} Clicked", i),
+                    ViewerEvent::AtomClicked(i) => {
+                        println!("Main Trace: Atom {} Clicked", i);
+                        if let Some(selected_atom) = &mut viewer.additional_render {
+                            selected_atom.add_atom(*i);
+                            viewer.dirty = true;
+                        }
+                    },
                     ViewerEvent::BondClicked(i) => println!("Main Trace: Bond {} Clicked", i),
                     ViewerEvent::NothingClicked => println!("Main Trace: Nothing Clicked"),
                 }
 
-                if let Some(render) = &mut viewer.additional_render {
-                    render.handle_event(&event);
-                    viewer.dirty = true;
-                }
             }
 
             updates
         },
         // GUI Handler
-        |(viewer, _controller), ctx, _scene| {
+        |(viewer, _controllers), ctx, _scene| {
             egui::Window::new("Controls").show(ctx, |ui| {
                 ui.label("Molecule Viewer");
                 if let Some(mol) = &viewer.molecule {

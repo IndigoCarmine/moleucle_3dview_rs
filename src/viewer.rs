@@ -10,13 +10,13 @@ pub enum ViewerEvent {
     NothingClicked,
 }
 
-pub struct MoleculeViewer {
+pub struct MoleculeViewer<T: AdditionalRender> {
     pub molecule: Option<Molecule>,
     pub dirty: bool,
-    pub additional_render: Option<Box<dyn AdditionalRender>>,
+    pub additional_render: Option<Box<T>>,
 }
 
-impl MoleculeViewer {
+impl<T: AdditionalRender> MoleculeViewer<T> {
     pub fn new() -> Self {
         Self {
             molecule: None,

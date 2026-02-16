@@ -1,4 +1,4 @@
-use crate::{camera::Camera, viewer::ViewerEvent, MoleculeViewer};
+use crate::{camera::Camera, viewer::{ViewerEvent, MoleculeViewer}, additional_render::AdditionalRender};
 use graphics::winit::keyboard::{KeyCode, PhysicalKey};
 use graphics::{
     winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -38,11 +38,11 @@ impl CameraController {
     /// - Shift + MMB: pan
     /// - Ctrl + MMB: dolly
     /// - LMB: pick
-    pub fn handle_event(
+    pub fn handle_event<T: AdditionalRender>(
         &mut self,
         event: &WindowEvent,
         _scene: &Scene,
-        viewer: &MoleculeViewer,
+        viewer: &MoleculeViewer<T>,
     ) -> (Option<ViewerEvent>, EngineUpdates) {
         let mut updates = EngineUpdates::default();
         let mut picked_event = None;
