@@ -31,7 +31,7 @@ pub mod molecule;
 pub mod viewer;
 
 pub use additional_render::{AdditionalRender, SelectedAtomRender};
-pub use camera::Camera;
+pub use camera::{Camera, LookAtCamera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
 pub use molecule::Molecule;
 pub use viewer::MoleculeViewer;

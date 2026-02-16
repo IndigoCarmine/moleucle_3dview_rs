@@ -1,13 +1,14 @@
 use graphics::{run, EngineUpdates, EntityUpdate, GraphicsSettings, Scene, UiSettings};
 use moleucle_3dview_rs::{
-    CameraController, Molecule, MoleculeViewer, SelectedAtomRender, additional_render, viewer::ViewerEvent
+    camera, viewer::ViewerEvent, Camera, CameraController, Molecule, MoleculeViewer,
+    SelectedAtomRender,
 };
 use std::path::Path;
 
 fn main() {
     // 1. Initialize State
     let mut viewer = MoleculeViewer::new();
-    let mut controller = CameraController::new();
+    let mut controller = CameraController::<camera::OrbitalCamera>::new();
 
     // Load default molecule
     let path = Path::new("Benzene.mol2");
@@ -28,7 +29,11 @@ fn main() {
     let mut scene = Scene::default();
 
     // Sync initial camera state
-    controller.camera.position = nalgebra::Point3::new(0.0, 0.0, -10.0);
+    controller.camera.look_at(
+        nalgebra::Point3::new(0.0, 0.0, -10.0),
+        nalgebra::Point3::origin(),
+        nalgebra::Vector3::y(),
+    );
     controller.update_scene_camera(&mut scene);
 
     // Initial Mesh Generation
@@ -72,11 +77,10 @@ fn main() {
                             selected_atom.add_atom(*i);
                             viewer.dirty = true;
                         }
-                    },
+                    }
                     ViewerEvent::BondClicked(i) => println!("Main Trace: Bond {} Clicked", i),
                     ViewerEvent::NothingClicked => println!("Main Trace: Nothing Clicked"),
                 }
-
             }
 
             updates
