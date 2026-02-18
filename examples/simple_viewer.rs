@@ -74,14 +74,19 @@ fn main() {
                     ViewerEvent::AtomClicked(i) => {
                         println!("Main Trace: Atom {} Clicked", i);
                         if let Some(selected_atom) = &mut viewer.additional_render {
-                            selected_atom.add_atom(*i);
+                            selected_atom.toggle_atom(*i);
                             viewer.dirty = true;
                         }
+
                     }
                     ViewerEvent::BondClicked(i) => println!("Main Trace: Bond {} Clicked", i),
                     ViewerEvent::NothingClicked => println!("Main Trace: Nothing Clicked"),
+
                 }
             }
+
+            // let ray = controller.ray_from_last_mouse();
+            // viewer.additional_render = Some(Box::new(SelectedAtomRender::new_with_ray   (ray)));
 
             updates
         },
