@@ -129,8 +129,9 @@ impl Camera for OrbitalCamera {
     fn pan(&mut self, delta: Vector2<f32>) {
         // Pan moves the center.
         // Move along local Right and Up.
-        let right = self.rotation * Vector3::x();
-        let up = self.rotation * Vector3::y();
+        let scale = self.radius * 0.01; // Adjust pan speed based on distance
+        let right = self.rotation * Vector3::x() * scale;
+        let up = self.rotation * Vector3::y() * scale;
 
         self.center += right * delta.x + up * delta.y;
     }
