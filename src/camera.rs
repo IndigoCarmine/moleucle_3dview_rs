@@ -160,31 +160,51 @@ impl Camera for OrbitalCamera {
         self.rotation = iso.rotation.inverse();
     }
 
-    fn ray_from_screen(
-        &self,
-        u: f32,
-        v: f32,
-        width: f32,
-        height: f32,
-    ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
-        let ndc_x = 2.0 * u / width - 1.0;
-        let ndc_y = 1.0 - 2.0 * v / height;
+fn ray_from_screen(
+    &self,
+    u: f32,
+    v: f32,
+    width: f32,
+    height: f32,
+) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
 
-        let vp = self.projection_matrix() * self.view_matrix();
-        let inv_vp = vp.try_inverse().unwrap();
+    let inv_vp = self
+        .view_projection()
+        .try_inverse()
+        .unwrap_or_else(Matrix4::identity);
 
-        let p_ndc = Vector4::new(ndc_x, ndc_y, -1.0, 1.0);
-        let mut p_world = inv_vp * p_ndc;
+    // Screen center origin assumed
+    let ndc_x = 1.0 - 2.0 * u / width; 
+    let ndc_y = 1.0 - 2.0 * v / height; 
 
-        p_world /= p_world.w;
+    // D3D / Metal depth range
+    let point_ndc_near = Point3::new(ndc_x, ndc_y, -1.0).to_homogeneous();
+    let point_ndc_far  = Point3::new(ndc_x, ndc_y, 1.0).to_homogeneous();
 
-        let origin = self.position();
-        let direction = (Point3::new(p_world.x, p_world.y, p_world.z) - origin).normalize();
+    let world_near = inv_vp * point_ndc_near;
+    let world_far  = inv_vp * point_ndc_far;
 
-        (
-            lin_alg::f32::Vec3::new(origin.x, origin.y, origin.z),
-            lin_alg::f32::Vec3::new(-direction.x, direction.y, direction.z),
-        )
+    let p_near = world_near.xyz() / world_near.w;
+    let p_far  = world_far.xyz()  / world_far.w;
+
+    let camera_pos = self.position();
+
+    let ray_origin = lin_alg::f32::Vec3::new(
+        camera_pos.x,
+        camera_pos.y,
+        camera_pos.z,
+    );
+
+    let ray_direction = (p_far - p_near).normalize();
+
+    (
+        ray_origin,
+        lin_alg::f32::Vec3::new(
+            ray_direction.x,
+            ray_direction.y,
+            ray_direction.z,
+        ),
+    )
     }
 }
 

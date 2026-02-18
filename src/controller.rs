@@ -162,4 +162,13 @@ impl<T: Camera + Default> CameraController<T> {
         // Update the project matrix in the graphics engine
         scene.camera.update_proj_mat();
     }
+
+    pub fn ray_from_last_mouse(&self) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
+        self.camera.ray_from_screen(
+            self.last_mouse_pos.x,
+            self.last_mouse_pos.y,
+            self.width,
+            self.height,
+        )
+    }
 }
