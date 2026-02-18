@@ -65,3 +65,43 @@ impl SelectedAtomRender {
         }
     }
 }
+
+
+pub struct DebugRender {
+    pub ray: (Vec3, Vec3),
+   
+}
+    
+impl DebugRender {
+    pub fn new(ray: (Vec3, Vec3)) -> Self {
+        Self { ray }
+    }
+}
+
+impl AdditionalRender for DebugRender {
+    fn update_scene(&self, _scene: &mut Scene, _molecule: &Molecule) {
+        // For debugging purposes, we can add some simple geometry or text here.
+        // For example, we could render the coordinate axes or display some text info.
+        
+        // draw ray
+        let (origin, direction) = self.ray;
+        let ray_mesh = Mesh::new_cylinder(0.05, 1.0, 10);
+        let ray_idx = _scene.meshes.len();
+        _scene.meshes.push(ray_mesh);
+        _scene.entities.push(Entity::new(
+            ray_idx,
+            origin,
+            Quaternion::new_identity(),
+            1.0,
+            (0.0, 1.0, 0.0),
+            0.2,
+        ));
+
+    }
+}
+
+impl DebugRender {
+    pub fn update_ray(&mut self, ray: (Vec3, Vec3)) {
+        self.ray = ray;
+    }
+}   

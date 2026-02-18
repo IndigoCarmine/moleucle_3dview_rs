@@ -8,7 +8,7 @@
 //! ```no_run
 //! use graphics::{run, Scene, UiSettings, GraphicsSettings, EngineUpdates, EntityUpdate, ControlScheme};
 //! use lin_alg::f32::Vec3;
-//! use moleucle_3dview_rs::{Molecule, MoleculeViewer};
+//! use moleucle_3dview_rs::{Molecule, MoleculeViewer, DebugRender, AdditionalRender};
 //! use std::path::Path;
 //!
 //! fn main() {
@@ -30,7 +30,7 @@ pub mod controller;
 pub mod molecule;
 pub mod viewer;
 
-pub use additional_render::{AdditionalRender, SelectedAtomRender};
+pub use additional_render::{AdditionalRender, SelectedAtomRender, DebugRender};
 pub use camera::{Camera, LookAtCamera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
 pub use molecule::Molecule;
