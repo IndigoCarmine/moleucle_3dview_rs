@@ -1,6 +1,5 @@
 use nalgebra::{
-    Isometry3, Matrix4, Orthographic3, Perspective3, Point3, UnitQuaternion, Vector2, Vector3,
-    Vector4,
+    Isometry3, Matrix4, Orthographic3, Perspective3, Point3, Unit, UnitQuaternion, Vector2, Vector3, Vector4
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +74,18 @@ impl Default for OrbitalCamera {
     }
 }
 
+impl OrbitalCamera {
+    fn view_to_world(&self) -> Isometry3<f32> {
+        let eye = self.position();
+        let target = self.target();
+        let up = self.up();
+        Isometry3::look_at_rh(&eye, &target, &up)
+    }
+    fn world_to_view(&self) -> Isometry3<f32> {
+        self.view_to_world().inverse()
+    }
+}
+
 impl Camera for OrbitalCamera {
     fn view_matrix(&self) -> Matrix4<f32> {
         let eye = self.position();
@@ -88,12 +99,6 @@ impl Camera for OrbitalCamera {
     }
 
     fn position(&self) -> Point3<f32> {
-        // Assume rotation identity -> looking at -Z?
-        // Standard Orbital:
-        // Eye = Center + Rotation * (0, 0, Radius)
-        // This means at Identity, Eye is at (0,0,R) relative to center.
-        // If we want to look at Center, we look along -Z.
-        // So this matches standard RH coordinate system where +Z is out of screen.
         self.center + self.rotation * Vector3::new(0.0, 0.0, self.radius)
     }
 
@@ -110,20 +115,20 @@ impl Camera for OrbitalCamera {
     }
 
     fn orbit(&mut self, delta_x: f32, delta_y: f32) {
-        // delta_x: yaw (around Y), delta_y: pitch (around local X/Right)
+        // let local_rot_axis = self.view_to_world() * (delta_x * Vector3::y() + delta_y * Vector3::x());
+        // let rot = UnitQuaternion::from_axis_angle(&Unit::new_normalize(local_rot_axis), local_rot_axis.magnitude());
+        // self.rotation = rot * self.rotation;
+        if delta_x < delta_y{
+            // let rot_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), delta_x);
+            let rot_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), delta_y);
+            self.rotation =   rot_x *self.rotation;
+        }else{
+            let rot_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), delta_x);
+            // let rot_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), delta_y);
+            self.rotation =   rot_y *self.rotation;
+        }
+       
 
-        let rot_y = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), delta_x);
-        let rot_x = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), -delta_y);
-
-        // Apply rotations: World Y then Local X?
-        // self.rotation = rot_y * self.rotation * rot_x;
-
-        // Let's try to be careful.
-        // We want to Rotate around TARGET.
-        // If we just rotate the 'rotation' quaternion:
-        // New Rotation = RotY * CurrentRotation * RotX
-        // This applies RotY in world space, and RotX in local space.
-        self.rotation = rot_y * self.rotation * rot_x;
     }
 
     fn pan(&mut self, delta: Vector2<f32>) {
@@ -160,207 +165,6 @@ impl Camera for OrbitalCamera {
         self.rotation = iso.rotation.inverse();
     }
 
-fn ray_from_screen(
-    &self,
-    u: f32,
-    v: f32,
-    width: f32,
-    height: f32,
-) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
-
-    let inv_vp = self
-        .view_projection()
-        .try_inverse()
-        .unwrap_or_else(Matrix4::identity);
-
-    // Screen center origin assumed
-    let ndc_x = 1.0 - 2.0 * u / width; 
-    let ndc_y = 1.0 - 2.0 * v / height; 
-
-    // D3D / Metal depth range
-    let point_ndc_near = Point3::new(ndc_x, ndc_y, -1.0).to_homogeneous();
-    let point_ndc_far  = Point3::new(ndc_x, ndc_y, 1.0).to_homogeneous();
-
-    let world_near = inv_vp * point_ndc_near;
-    let world_far  = inv_vp * point_ndc_far;
-
-    let p_near = world_near.xyz() / world_near.w;
-    let p_far  = world_far.xyz()  / world_far.w;
-
-    let camera_pos = self.position();
-
-    let ray_origin = lin_alg::f32::Vec3::new(
-        camera_pos.x,
-        camera_pos.y,
-        camera_pos.z,
-    );
-
-    let ray_direction = (p_far - p_near).normalize();
-
-    (
-        ray_origin,
-        lin_alg::f32::Vec3::new(
-            ray_direction.x,
-            ray_direction.y,
-            ray_direction.z,
-        ),
-    )
-    }
-}
-
-// =========================================================================
-// Legacy / LookAt Camera
-// =========================================================================
-
-#[derive(Clone, Copy, Debug)]
-pub struct LookAtCamera {
-    pub position: Point3<f32>,
-    pub target: Point3<f32>,
-    pub up: Vector3<f32>,
-
-    pub projection_type: ProjectionType,
-
-    // Perspective
-    pub fov_y: f32,
-
-    // Orthographic
-    pub ortho_scale: f32,
-
-    pub aspect: f32,
-    pub near: f32,
-    pub far: f32,
-}
-
-impl Default for LookAtCamera {
-    fn default() -> Self {
-        Self {
-            position: Point3::new(0.0, 0.0, 10.0),
-            target: Point3::origin(),
-            up: Vector3::y(),
-            projection_type: ProjectionType::Perspective,
-            fov_y: 45.0f32.to_radians(),
-            ortho_scale: 10.0,
-            aspect: 1.0,
-            near: 0.1,
-            far: 100.0,
-        }
-    }
-}
-
-impl Camera for LookAtCamera {
-    fn view_matrix(&self) -> Matrix4<f32> {
-        Isometry3::look_at_rh(&self.position, &self.target, &self.up).to_homogeneous()
-    }
-
-    fn projection_matrix(&self) -> Matrix4<f32> {
-        match self.projection_type {
-            ProjectionType::Perspective => {
-                Perspective3::new(self.aspect, self.fov_y, self.near, self.far).to_homogeneous()
-            }
-            ProjectionType::Orthographic => {
-                let width = self.ortho_scale * self.aspect;
-                let height = self.ortho_scale;
-                Orthographic3::new(
-                    -width / 2.0,
-                    width / 2.0,
-                    -height / 2.0,
-                    height / 2.0,
-                    self.near,
-                    self.far,
-                )
-                .to_homogeneous()
-            }
-        }
-    }
-
-    fn position(&self) -> Point3<f32> {
-        self.position
-    }
-    fn target(&self) -> Point3<f32> {
-        self.target
-    }
-    fn up(&self) -> Vector3<f32> {
-        self.up
-    }
-
-    fn set_aspect(&mut self, aspect: f32) {
-        self.aspect = aspect;
-    }
-
-    fn orbit(&mut self, delta_x: f32, delta_y: f32) {
-        let to_pos = self.position - self.target;
-
-        let fwd = -to_pos.normalize();
-        let right = fwd.cross(&self.up).normalize();
-        let local_up = right.cross(&fwd).normalize();
-
-        // Horizontal rotation (around world/local UP?)
-        // Replicating original behavior: around local_up
-        let rot_y =
-            nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(local_up), delta_x);
-        let mut to_pos = rot_y * to_pos;
-        let mut new_up = rot_y * local_up;
-
-        // Vertical
-        let fwd = -to_pos.normalize();
-        let right = fwd.cross(&new_up).normalize();
-        let rot_x =
-            nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(right), -delta_y);
-
-        to_pos = rot_x * to_pos;
-        new_up = rot_x * new_up;
-
-        self.position = self.target + to_pos;
-        self.up = new_up;
-    }
-
-    fn pan(&mut self, delta: Vector2<f32>) {
-        let fwd = (self.target - self.position).normalize();
-        let right = fwd.cross(&self.up).normalize();
-        let local_up = right.cross(&fwd).normalize();
-
-        // Adjust pan speed based on zoom/distance
-        let factor = match self.projection_type {
-            ProjectionType::Perspective => (self.position - self.target).magnitude() * 0.001,
-            ProjectionType::Orthographic => self.ortho_scale * 0.001,
-        };
-
-        let movement = right * delta.x * factor + local_up * delta.y * factor;
-        self.position += movement;
-        self.target += movement;
-        self.up = local_up;
-    }
-
-    fn dolly(&mut self, delta: f32) {
-        match self.projection_type {
-            ProjectionType::Perspective => {
-                let dir = self.target - self.position;
-                let dist = dir.magnitude();
-                let new_dist = (dist - delta).max(1.0);
-                self.position = self.target - dir.normalize() * new_dist;
-            }
-            ProjectionType::Orthographic => {
-                self.ortho_scale = (self.ortho_scale - delta).max(1.0);
-            }
-        }
-    }
-
-    fn fov_y(&self) -> f32 {
-        self.fov_y
-    }
-    fn near(&self) -> f32 {
-        self.near
-    }
-    fn far(&self) -> f32 {
-        self.far
-    }
-
-    fn look_at(&mut self, eye: Point3<f32>, target: Point3<f32>, up: Vector3<f32>) {
-        self.position = eye;
-        self.target = target;
-        self.up = up;
-    }
-
     fn ray_from_screen(
         &self,
         u: f32,
@@ -368,55 +172,43 @@ impl Camera for LookAtCamera {
         width: f32,
         height: f32,
     ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
-        let ndc_x = 2.0 * u / width - 1.0;
-        let ndc_y = 1.0 - 2.0 * v / height;
 
-        let _fwd = (self.target() - self.position()).normalize();
-        let _right = _fwd.cross(&self.up()).normalize();
-        let _local_up = _right.cross(&_fwd).normalize();
+        let inv_vp = self
+            .view_projection()
+            .try_inverse()
+            .unwrap_or_else(Matrix4::identity);
 
-        // Default to Perspective ray casting logic for now, or use projection matrix inverse
-        // But projection matrix inverse is more generic.
-        // Let's stick to the manual calculation assuming perspective as it's common.
-        // Or better, use the inv_view_proj if we want to be generic.
-        // For simplicity, let's copy the logic but adapt to generic Fov/Aspect.
+        // Screen center origin assumed
+        let ndc_x = 1.0 - 2.0 * u / width;
+        let ndc_y = 1.0 - 2.0 * v / height; 
 
-        let ray_dir = {
-            // Assume perspective for ray casting for now as it's the primary use case
-            let _tan_fov = (self.fov_y() * 0.5).tan();
-            // TODO: Ensure aspect is correct
-            // self.aspect is not in trait, but projection matrix has it.
-            // Let's assume aspect is handled by implementations or self.projection_matrix().
+        // D3D / Metal depth range
+        let point_ndc_near = Point3::new(ndc_x, ndc_y, -1.0).to_homogeneous();
+        let point_ndc_far  = Point3::new(ndc_x, ndc_y, 1.0).to_homogeneous();
 
-            // Re-deriving aspect from projection matrix (1,1) element?
-            // Better to rely on the implementation specifics or keep it simple.
+        let world_near = inv_vp * point_ndc_near;
+        let world_far  = inv_vp * point_ndc_far;
 
-            // Actually, we can just use the provided view/proj matrices.
-            let inv_vp = self
-                .view_projection()
-                .try_inverse()
-                .unwrap_or_else(Matrix4::identity);
+        let p_near = world_near.xyz() / world_near.w;
+        let p_far  = world_far.xyz()  / world_far.w;
 
-            // NDC near and far
-            let point_ndc_near = Point3::new(ndc_x, ndc_y, -1.0).to_homogeneous();
-            let point_ndc_far = Point3::new(ndc_x, ndc_y, 1.0).to_homogeneous();
+        let camera_pos = self.position();
 
-            let point_world_near = inv_vp * point_ndc_near;
-            let point_world_far = inv_vp * point_ndc_far;
+        let ray_origin = lin_alg::f32::Vec3::new(
+            camera_pos.x,
+            camera_pos.y,
+            camera_pos.z,
+        );
 
-            let p_near = point_world_near.xyz() / point_world_near.w;
-            let p_far = point_world_far.xyz() / point_world_far.w;
-
-            (p_far - p_near).normalize()
-        };
-
-        // Origin is position for perspective, or near plane point for ortho
-        // The unproject method above handles both cases implicitly if inv_vp is correct.
-        let ray_origin = self.position();
+        let ray_direction = (p_far - p_near).normalize();
 
         (
-            lin_alg::f32::Vec3::new(ray_origin.x, ray_origin.y, ray_origin.z),
-            lin_alg::f32::Vec3::new(ray_dir.x, ray_dir.y, ray_dir.z),
+            ray_origin,
+            lin_alg::f32::Vec3::new(
+                ray_direction.x,
+                ray_direction.y,
+                ray_direction.z,
+            ),
         )
     }
 }

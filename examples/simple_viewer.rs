@@ -8,7 +8,7 @@ use std::path::Path;
 fn main() {
     // 1. Initialize State
     let mut viewer = MoleculeViewer::new();
-    let mut controller = CameraController::<camera::OrbitalCamera>::new();
+    let controller = CameraController::<camera::OrbitalCamera>::new();
 
     // Load default molecule
     let path = Path::new("Benzene.mol2");
@@ -28,13 +28,6 @@ fn main() {
     // 2. Initialize Scene
     let mut scene = Scene::default();
 
-    // Sync initial camera state
-    controller.camera.look_at(
-        nalgebra::Point3::new(0.0, 0.0, -10.0),
-        nalgebra::Point3::origin(),
-        nalgebra::Vector3::y(),
-    );
-    controller.update_scene_camera(&mut scene);
 
     // Initial Mesh Generation
     viewer.update_scene(&mut scene);
