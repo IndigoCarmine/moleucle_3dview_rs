@@ -42,8 +42,54 @@ pub trait Camera {
         v: f32,
         width: f32,
         height: f32,
-    ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3);
+    ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
+
+        let inv_vp = self
+            .view_projection()
+            .try_inverse()
+            .unwrap_or_else(Matrix4::identity);
+
+        // Screen center origin assumed
+        let ndc_x = -1.0 + 2.0 * u / width;
+        let ndc_y = 1.0 - 2.0 * v / height; 
+
+        // D3D / Metal depth range
+        let point_ndc_near = Point3::new(ndc_x, ndc_y, -1.0).to_homogeneous();
+        let point_ndc_far  = Point3::new(ndc_x, ndc_y, 0.0).to_homogeneous();
+
+        let world_near = inv_vp * point_ndc_near;
+        let world_far  = inv_vp * point_ndc_far;
+
+        let p_near = world_near.xyz() / world_near.w;
+        let p_far  = world_far.xyz()  / world_far.w;
+
+        let camera_pos = self.position();
+
+        // if p_far and p_near and eye are not on the same line, it is error.
+        if (p_far - camera_pos.coords).normalize().dot(&(p_near - camera_pos.coords).normalize()) < 0.999 {
+            eprintln!("Warning: ray_from_screen may be inaccurate due to non-linear projection. Consider using a linear projection for accurate picking.");
+        }
+        println!("Ray from screen: near {:?}, far {:?}, camera_pos {:?}", p_near, p_far, camera_pos);
+
+        let ray_origin = lin_alg::f32::Vec3::new(
+            camera_pos.x,
+            camera_pos.y,
+            camera_pos.z,
+        );
+
+        let ray_direction = (p_far - camera_pos.coords).normalize();
+
+        (
+            ray_origin,
+            lin_alg::f32::Vec3::new(
+                -ray_direction.x,
+                ray_direction.y,
+                ray_direction.z,
+            ),
+        )
+    }
 }
+
 
 // =========================================================================
 // Orbital Camera
@@ -165,50 +211,4 @@ impl Camera for OrbitalCamera {
         self.rotation = iso.rotation.inverse();
     }
 
-    fn ray_from_screen(
-        &self,
-        u: f32,
-        v: f32,
-        width: f32,
-        height: f32,
-    ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
-
-        let inv_vp = self
-            .view_projection()
-            .try_inverse()
-            .unwrap_or_else(Matrix4::identity);
-
-        // Screen center origin assumed
-        let ndc_x = 1.0 - 2.0 * u / width;
-        let ndc_y = 1.0 - 2.0 * v / height; 
-
-        // D3D / Metal depth range
-        let point_ndc_near = Point3::new(ndc_x, ndc_y, -1.0).to_homogeneous();
-        let point_ndc_far  = Point3::new(ndc_x, ndc_y, 1.0).to_homogeneous();
-
-        let world_near = inv_vp * point_ndc_near;
-        let world_far  = inv_vp * point_ndc_far;
-
-        let p_near = world_near.xyz() / world_near.w;
-        let p_far  = world_far.xyz()  / world_far.w;
-
-        let camera_pos = self.position();
-
-        let ray_origin = lin_alg::f32::Vec3::new(
-            camera_pos.x,
-            camera_pos.y,
-            camera_pos.z,
-        );
-
-        let ray_direction = (p_far - p_near).normalize();
-
-        (
-            ray_origin,
-            lin_alg::f32::Vec3::new(
-                ray_direction.x,
-                ray_direction.y,
-                ray_direction.z,
-            ),
-        )
-    }
 }
