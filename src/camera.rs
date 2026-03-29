@@ -1,7 +1,4 @@
-
-use nalgebra::{
-    Isometry3, Matrix4,Perspective3, Point3, Unit, UnitQuaternion, Vector2, Vector3, Vector4
-};
+use lin_alg::f32::{Mat4, Quaternion, Vec2, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProjectionType {
@@ -10,20 +7,20 @@ pub enum ProjectionType {
 }
 
 pub trait Camera {
-    fn view_matrix(&self) -> Matrix4<f32>;
-    fn projection_matrix(&self) -> Matrix4<f32>;
-    fn view_projection(&self) -> Matrix4<f32> {
+    fn view_matrix(&self) -> Mat4;
+    fn projection_matrix(&self) -> Mat4;
+    fn view_projection(&self) -> Mat4 {
         self.projection_matrix() * self.view_matrix()
     }
-    fn camera_rotation(&self) -> UnitQuaternion<f32>;
-    fn position(&self) -> Point3<f32>;
-    fn target(&self) -> Point3<f32>;
-    fn up(&self) -> Vector3<f32>;
+    fn camera_rotation(&self) -> Quaternion;
+    fn position(&self) -> Vec3;
+    fn target(&self) -> Vec3;
+    fn up(&self) -> Vec3;
 
     fn set_aspect(&mut self, aspect: f32);
 
     fn orbit(&mut self, delta_x: f32, delta_y: f32);
-    fn pan(&mut self, delta: Vector2<f32>);
+    fn pan(&mut self, delta: Vec2);
     fn dolly(&mut self, delta: f32);
 
     fn fov_y(&self) -> f32;
@@ -31,7 +28,7 @@ pub trait Camera {
     fn far(&self) -> f32;
 
     // Optional helper to set look_at if possible, otherwise it might be specific implementation dependent
-    fn look_at(&mut self, eye: Point3<f32>, target: Point3<f32>, up: Vector3<f32>);
+    fn look_at(&mut self, eye: Vec3, target: Vec3, up: Vec3);
 
     // Ray casting from screen coordinates to world coordinates
     // u, v: screen coordinates (pixels)
@@ -44,33 +41,19 @@ pub trait Camera {
         width: f32,
         height: f32,
     ) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {
-
-
-        let inv_vp = self
-            .view_projection()
-            .try_inverse()
-            .unwrap_or_else(Matrix4::identity);
-
-        // NDC
-        let ndc_x = 1.0 - 2.0 * u / width;
+        // Convert pixel coords to NDC, with +Y up.
+        let ndc_x = 2.0 * u / width - 1.0;
         let ndc_y = 1.0 - 2.0 * v / height;
 
-        // OpenGL depth
-        let near = Vector4::new(ndc_x, ndc_y, -1.0, 1.0);
-        let far  = Vector4::new(ndc_x, ndc_y,  1.0, 1.0);
+        let tan_half = (self.fov_y() * 0.5).tan();
+        let x = ndc_x * (width / height) * tan_half;
+        let y = ndc_y * tan_half;
 
-        let world_near = inv_vp * near;
-        let world_far  = inv_vp * far;
+        // Camera-space forward is +Z in this viewer convention.
+        let dir_camera = Vec3::new(x, y, 1.0).to_normalized();
+        let dir_world = self.camera_rotation().rotate_vec(dir_camera).to_normalized();
 
-        let p_near = world_near.xyz() / world_near.w;
-        let p_far  = world_far.xyz()  / world_far.w;
-
-        let dir = (p_far - p_near).normalize();
-
-        (
-            lin_alg::f32::Vec3::new(p_near.x, p_near.y, p_near.z),
-            lin_alg::f32::Vec3::new(dir.x, dir.y, dir.z),
-        )
+        (self.position(), dir_world)
     }
 }
 
@@ -80,8 +63,8 @@ pub trait Camera {
 // =========================================================================
 
 pub struct OrbitalCamera {
-    pub center: Point3<f32>,
-    pub rotation: UnitQuaternion<f32>,
+    pub center: Vec3,
+    pub rotation: Quaternion,
     pub radius: f32,
 
     pub fov_y: f32,
@@ -90,50 +73,48 @@ pub struct OrbitalCamera {
     pub far: f32,
     
     // For debug visualization: last orbit rotation axis
-    pub last_orbit_axis: Vector3<f32>,
+    pub last_orbit_axis: Vec3,
 }
 
 impl Default for OrbitalCamera {
     fn default() -> Self {
         Self {
-            center: Point3::origin(),
-            rotation: UnitQuaternion::identity(),
+            center: Vec3::new_zero(),
+            rotation: Quaternion::new_identity(),
             radius: 10.0,
             fov_y: 45.0f32.to_radians(),
             aspect: 1.0,
             near: 0.1,
             far: 100.0,
-            last_orbit_axis: Vector3::z(), // Default: Z-axis
+            last_orbit_axis: Vec3::new(0.0, 0.0, 1.0),
         }
     }
 }
 
 impl Camera for OrbitalCamera {
-    fn view_matrix(&self) -> Matrix4<f32> {
-        let eye = self.position();
-        let target = self.target();
-        let up = self.up();
-
-        Isometry3::look_at_rh(&eye, &target, &up).to_homogeneous()
+    fn view_matrix(&self) -> Mat4 {
+        let rot_inv = self.rotation.inverse().to_matrix();
+        let trans = Mat4::new_translation(-self.position());
+        rot_inv * trans
     }
-    fn camera_rotation(&self) -> UnitQuaternion<f32> {
+    fn camera_rotation(&self) -> Quaternion {
         self.rotation
     }
 
-    fn projection_matrix(&self) -> Matrix4<f32> {
-        Perspective3::new(self.aspect, self.fov_y, self.near, self.far).to_homogeneous()
+    fn projection_matrix(&self) -> Mat4 {
+        Mat4::new_perspective_lh(self.fov_y, self.aspect, self.near, self.far)
     }
 
-    fn position(&self) -> Point3<f32> {
-        self.center - self.rotation * Vector3::new(0.0, 0.0, self.radius)
+    fn position(&self) -> Vec3 {
+        self.center - self.rotation.rotate_vec(Vec3::new(0.0, 0.0, self.radius))
     }
 
-    fn target(&self) -> Point3<f32> {
+    fn target(&self) -> Vec3 {
         self.center
     }
 
-    fn up(&self) -> Vector3<f32> {
-        self.rotation * Vector3::y()
+    fn up(&self) -> Vec3 {
+        self.rotation.rotate_vec(Vec3::new(0.0, 1.0, 0.0))
     }
 
     fn set_aspect(&mut self, aspect: f32) {
@@ -142,23 +123,26 @@ impl Camera for OrbitalCamera {
 
     fn orbit(&mut self, delta_x: f32, delta_y: f32) {
         // Calculate rotation axis in world space
-        let rot_axis = self.rotation * Vector3::new(delta_y, delta_x, 0.0).normalize();
-        // let rot_axis = self.rotation * Vector3::new(1.0,0.1,0.0);
+        let local_axis = Vec3::new(delta_y, delta_x, 0.0);
+        if local_axis.magnitude() < 1e-8 {
+            return;
+        }
+        let rot_axis = self.rotation.rotate_vec(local_axis.to_normalized());
         let len = (delta_x * delta_x + delta_y * delta_y).sqrt();
         
         // Store the axis for debug visualization
         self.last_orbit_axis = rot_axis;
         
-        self.rotation = UnitQuaternion::from_axis_angle(
-            &Unit::new_normalize(rot_axis), len ) * self.rotation;
+        self.rotation = Quaternion::from_axis_angle(rot_axis.to_normalized(), len) * self.rotation;
+        self.rotation = self.rotation.to_normalized();
     }
 
-    fn pan(&mut self, delta: Vector2<f32>) {
+    fn pan(&mut self, delta: Vec2) {
         // Pan moves the center.
         // Move along local Right and Up.
         let scale = self.radius * 0.1; // Adjust pan speed based on distance
-        let right = self.rotation * Vector3::x() * -scale;
-        let up = self.rotation * Vector3::y() * scale;
+        let right = self.rotation.rotate_vec(Vec3::new(1.0, 0.0, 0.0)) * -scale;
+        let up = self.rotation.rotate_vec(Vec3::new(0.0, 1.0, 0.0)) * scale;
 
         self.center += right * delta.x + up * delta.y;
     }
@@ -177,14 +161,15 @@ impl Camera for OrbitalCamera {
         self.far
     }
 
-    fn look_at(&mut self, eye: Point3<f32>, target: Point3<f32>, up: Vector3<f32>) {
+    fn look_at(&mut self, eye: Vec3, target: Vec3, _up: Vec3) {
         self.center = target;
 
         let dir = eye - target;
         self.radius = dir.magnitude();
 
-        let iso = Isometry3::look_at_rh(&eye, &target, &up);
-        self.rotation = iso.rotation.inverse();
+        // Rotation maps +Z to forward(target-eye).
+        let forward = (target - eye).to_normalized();
+        self.rotation = Quaternion::from_unit_vecs(Vec3::new(0.0, 0.0, 1.0), forward).to_normalized();
     }
 
 }

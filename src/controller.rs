@@ -8,11 +8,11 @@ use graphics::{
     winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     EngineUpdates, Scene,
 };
-use nalgebra::{Point2, Vector2};
+use lin_alg::f32::Vec2;
 
 pub struct CameraController<T: Camera + Default> {
     pub camera: Box<T>,
-    last_mouse_pos: Point2<f32>,
+    last_mouse_pos: Vec2,
     mouse_lb_pressed: bool,
     mouse_mb_pressed: bool,
     mouse_rb_pressed: bool,
@@ -31,7 +31,7 @@ impl<T: Camera + Default> CameraController<T> {
 
         Self {
             camera: Box::new(camera),
-            last_mouse_pos: Point2::origin(),
+            last_mouse_pos: Vec2::new(0.0, 0.0),
             mouse_lb_pressed: false,
             mouse_mb_pressed: false,
             mouse_rb_pressed: false,
@@ -99,8 +99,9 @@ impl<T: Camera + Default> CameraController<T> {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let new_pos = Point2::new(position.x as f32, position.y as f32);
-                let delta = new_pos - self.last_mouse_pos;
+                let new_pos = Vec2::new(position.x as f32, position.y as f32);
+                let delta_x = new_pos.x - self.last_mouse_pos.x;
+                let delta_y = new_pos.y - self.last_mouse_pos.y;
 
                 // Orbit with MMB (or RMB for convenience)
                 if self.mouse_mb_pressed || self.mouse_rb_pressed {
@@ -108,14 +109,14 @@ impl<T: Camera + Default> CameraController<T> {
                         // Pan
                         let sensitivity = 0.01;
                         self.camera
-                            .pan(Vector2::new(delta.x * sensitivity, delta.y * sensitivity));
+                            .pan(Vec2::new(delta_x * sensitivity, delta_y * sensitivity));
                     } else if self.ctrl_pressed {
                         // Dolly
-                        self.camera.dolly(delta.y * 0.1);
+                        self.camera.dolly(delta_y * 0.1);
                     } else {
                         // Orbit
                         // Sensitivity: 0.005 radians per pixel
-                        self.camera.orbit(delta.x * 0.005, delta.y * 0.005);
+                        self.camera.orbit(delta_x * 0.005, delta_y * 0.005);
                     }
                     updates.camera = true;
                 }
@@ -139,10 +140,9 @@ impl<T: Camera + Default> CameraController<T> {
     pub fn update_scene_camera(&self, scene: &mut Scene) {
                 let pos = self.camera.position();
 
-        // Bridge nalgebra to lin_alg
         scene.camera.position = lin_alg::f32::Vec3::new(pos.x, pos.y, pos.z);
-        let  rot = self.camera.camera_rotation();
-        scene.camera.orientation = lin_alg::f32::Quaternion::new(rot.w, rot.i, rot.j, rot.k);
+        let rot = self.camera.camera_rotation();
+        scene.camera.orientation = lin_alg::f32::Quaternion::new(rot.w, rot.x, rot.y, rot.z);
 
         scene.camera.fov_y = self.camera.fov_y();
         scene.camera.near = self.camera.near();

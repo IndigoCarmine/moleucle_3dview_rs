@@ -1,9 +1,9 @@
-use nalgebra::Point3;
+use lin_alg::f32::Vec3;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct Atom {
-    pub position: Point3<f32>,
+    pub position: Vec3,
     pub element: String,
     pub id: usize,
 }
@@ -57,7 +57,7 @@ impl Molecule {
                             let element = type_str.split('.').next().unwrap_or("?").to_uppercase();
 
                             atoms.push(Atom {
-                                position: Point3::new(x, y, z),
+                                position: Vec3::new(x, y, z),
                                 element,
                                 id: atoms.len() + 1, // 1-based usually in file, but we use index
                             });

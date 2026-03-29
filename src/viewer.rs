@@ -146,9 +146,7 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             // 2. Create Entities
             // Atoms
             for atom in &mol.atoms {
-                // Convert nalgebra Point3 to graphics Vec3
-                // Assuming nalgebra::Point3 fields are x, y, z or coords[0], etc.
-                // But atom.position is Point3 from nalgebra.
+                // Convert atom position to graphics Vec3.
                 let pos = Vec3::new(atom.position.x, atom.position.y, atom.position.z);
 
                 let color = match atom.element.as_str() {
