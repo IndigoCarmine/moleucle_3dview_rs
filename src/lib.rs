@@ -36,7 +36,7 @@ pub use additional_render::{AdditionalRender, SelectedAtomRender, DebugRender};
 pub use camera::{Camera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
 pub use molecule::Molecule;
-pub use offscreen_renderer::OffscreenRenderer;
+pub use offscreen_renderer::{OffscreenRenderer, RenderStyle};
 pub use scene_types::{Entity, Mesh, Scene};
 pub use ui::ViewerUiComponent;
 pub use viewer::MoleculeViewer;

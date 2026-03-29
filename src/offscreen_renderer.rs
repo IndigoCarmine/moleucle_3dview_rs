@@ -5,6 +5,14 @@ use lin_alg::f32::{Quaternion, Vec3};
 use std::collections::HashSet;
 use wgpu::util::DeviceExt;
 
+const DEFAULT_MESH_RESOLUTION: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderStyle {
+    BallStick,
+    Wireframe,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -21,6 +29,7 @@ struct Uniforms {
 
 struct GpuResources {
     pipeline: wgpu::RenderPipeline,
+    wire_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     vertex_buffer: Option<wgpu::Buffer>,
@@ -30,6 +39,8 @@ struct GpuResources {
 pub struct OffscreenRenderer {
     width: u32,
     height: u32,
+    mesh_resolution: usize,
+    render_style: RenderStyle,
     color_texture: Option<wgpu::Texture>,
     color_view: Option<wgpu::TextureView>,
     depth_texture: Option<wgpu::Texture>,
@@ -42,18 +53,51 @@ pub struct OffscreenRenderer {
 
 impl OffscreenRenderer {
     pub fn new() -> Self {
+        Self::new_with_mesh_resolution(DEFAULT_MESH_RESOLUTION)
+    }
+
+    pub fn new_with_mesh_resolution(mesh_resolution: usize) -> Self {
+        let mesh_resolution = mesh_resolution.max(3);
+        let sphere_lat = mesh_resolution;
+        let sphere_lon = mesh_resolution * 2;
+        let cylinder_sides = mesh_resolution * 2;
+
         Self {
             width: 0,
             height: 0,
+            mesh_resolution,
+            render_style: RenderStyle::BallStick,
             color_texture: None,
             color_view: None,
             depth_texture: None,
             depth_view: None,
             texture_id: None,
             gpu: None,
-            sphere_mesh: RenderMesh::new_sphere_uv(1.0, 16, 24),
-            cylinder_mesh: RenderMesh::new_cylinder(1.0, 1.0, 20),
+            sphere_mesh: RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon),
+            cylinder_mesh: RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides),
         }
+    }
+
+    pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
+        let mesh_resolution = mesh_resolution.max(3);
+        if self.mesh_resolution == mesh_resolution {
+            return;
+        }
+
+        self.mesh_resolution = mesh_resolution;
+        let sphere_lat = mesh_resolution;
+        let sphere_lon = mesh_resolution * 2;
+        let cylinder_sides = mesh_resolution * 2;
+        self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
+        self.cylinder_mesh = RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides);
+    }
+
+    pub fn render_style(&self) -> RenderStyle {
+        self.render_style
+    }
+
+    pub fn set_render_style(&mut self, render_style: RenderStyle) {
+        self.render_style = render_style;
     }
 
     pub fn texture_id(&self) -> Option<TextureId> {
@@ -162,7 +206,11 @@ impl OffscreenRenderer {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(&gpu.pipeline);
+            let pipeline = match self.render_style {
+                RenderStyle::BallStick => &gpu.pipeline,
+                RenderStyle::Wireframe => &gpu.wire_pipeline,
+            };
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
             if let Some(vertex_buffer) = &gpu.vertex_buffer {
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
@@ -241,6 +289,13 @@ impl OffscreenRenderer {
     }
 
     fn build_scene_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
+        match self.render_style {
+            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, selected_atoms),
+            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, selected_atoms),
+        }
+    }
+
+    fn build_ballstick_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
         let mut vertices = Vec::new();
 
         if let Some(mol) = molecule {
@@ -260,14 +315,25 @@ impl OffscreenRenderer {
                 let orientation = Quaternion::from_unit_vecs(up, dir);
                 let mid = (a + b) * 0.5;
 
-                append_mesh_triangles(
-                    &mut vertices,
-                    &self.cylinder_mesh,
-                    mid,
-                    orientation,
-                    Vec3::new(0.15, len, 0.15),
-                    [0.55, 0.55, 0.55],
-                );
+                let bond_order = bond.order.max(1) as usize;
+                let line_offsets = bond_line_offsets(bond_order);
+                let mut lateral = Vec3::new(1.0, 0.0, 0.0);
+                if dir.dot(lateral).abs() > 0.9 {
+                    lateral = Vec3::new(0.0, 0.0, 1.0);
+                }
+                lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
+
+                let base_radius = if bond_order <= 1 { 0.15 } else { 0.10 };
+                for offset in line_offsets {
+                    append_mesh_triangles(
+                        &mut vertices,
+                        &self.cylinder_mesh,
+                        mid + lateral * offset,
+                        orientation,
+                        Vec3::new(base_radius, len, base_radius),
+                        [0.55, 0.55, 0.55],
+                    );
+                }
             }
 
             for (idx, atom) in mol.atoms.iter().enumerate() {
@@ -316,6 +382,89 @@ impl OffscreenRenderer {
             Vec3::new(0.0, 0.0, axis_len * 0.5),
             Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
             Vec3::new(axis_radius, axis_len, axis_radius),
+            [0.0, 0.0, 1.0],
+        );
+
+        vertices
+    }
+
+    fn build_wireframe_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
+        let mut vertices = Vec::new();
+
+        if let Some(mol) = molecule {
+            let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
+
+            for bond in &mol.bonds {
+                let a = mol.atoms[bond.atom_a].position;
+                let b = mol.atoms[bond.atom_b].position;
+                let diff = b - a;
+                let len = diff.magnitude();
+                if len < 0.001 {
+                    continue;
+                }
+
+                let dir = diff.to_normalized();
+                let mut lateral = Vec3::new(1.0, 0.0, 0.0);
+                if dir.dot(lateral).abs() > 0.9 {
+                    lateral = Vec3::new(0.0, 0.0, 1.0);
+                }
+                lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
+
+                let bond_order = bond.order.max(1) as usize;
+                for offset in bond_line_offsets(bond_order) {
+                    let off = lateral * offset;
+                    append_line(&mut vertices, a + off, b + off, [0.70, 0.70, 0.72]);
+                }
+            }
+
+            for (idx, atom) in mol.atoms.iter().enumerate() {
+                let pos = atom.position;
+                let selected_this = selected.contains(&idx);
+                let span = if selected_this { 0.22 } else { 0.14 };
+                let color = if selected_this {
+                    [1.0, 0.35, 0.10]
+                } else {
+                    element_color(&atom.element)
+                };
+
+                append_line(
+                    &mut vertices,
+                    pos + Vec3::new(-span, 0.0, 0.0),
+                    pos + Vec3::new(span, 0.0, 0.0),
+                    color,
+                );
+                append_line(
+                    &mut vertices,
+                    pos + Vec3::new(0.0, -span, 0.0),
+                    pos + Vec3::new(0.0, span, 0.0),
+                    color,
+                );
+                append_line(
+                    &mut vertices,
+                    pos + Vec3::new(0.0, 0.0, -span),
+                    pos + Vec3::new(0.0, 0.0, span),
+                    color,
+                );
+            }
+        }
+
+        let axis_len = 2.0;
+        append_line(
+            &mut vertices,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(axis_len, 0.0, 0.0),
+            [1.0, 0.0, 0.0],
+        );
+        append_line(
+            &mut vertices,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, axis_len, 0.0),
+            [0.0, 1.0, 0.0],
+        );
+        append_line(
+            &mut vertices,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, axis_len),
             [0.0, 0.0, 1.0],
         );
 
@@ -473,8 +622,103 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         cache: None,
     });
 
+    let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("offscreen-wire-shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+struct VSOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+@vertex
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) _normal: vec3<f32>,
+    @location(2) color: vec3<f32>,
+) -> VSOut {
+    var out: VSOut;
+    out.position = uniforms.view_proj * vec4<f32>(position, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}
+"#
+            .into(),
+        ),
+    });
+
+    let wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("offscreen-wire-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &wire_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: std::mem::size_of::<[f32; 3]>() as u64,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
+                        shader_location: 2,
+                    },
+                ],
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &wire_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24Plus,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
     GpuResources {
         pipeline,
+        wire_pipeline,
         uniform_buffer,
         uniform_bind_group,
         vertex_buffer: None,
@@ -492,6 +736,19 @@ fn element_color(element: &str) -> [f32; 3] {
         "P" => [1.00, 0.55, 0.15],
         "CL" => [0.10, 0.85, 0.20],
         _ => [0.70, 0.70, 0.70],
+    }
+}
+
+fn bond_line_offsets(order: usize) -> Vec<f32> {
+    match order {
+        0 | 1 => vec![0.0],
+        2 => vec![-0.16, 0.16],
+        3 => vec![-0.26, 0.0, 0.26],
+        n => {
+            let spacing = 0.14;
+            let half = (n as f32 - 1.0) * 0.5;
+            (0..n).map(|i| (i as f32 - half) * spacing).collect()
+        }
     }
 }
 
@@ -649,4 +906,18 @@ impl RenderMesh {
 
         Self { vertices, indices }
     }
+}
+
+fn append_line(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, color: [f32; 3]) {
+    let normal = [0.0, 1.0, 0.0];
+    out.push(Vertex {
+        position: [a.x, a.y, a.z],
+        normal,
+        color,
+    });
+    out.push(Vertex {
+        position: [b.x, b.y, b.z],
+        normal,
+        color,
+    });
 }

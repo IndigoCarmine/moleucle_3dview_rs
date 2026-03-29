@@ -6,6 +6,7 @@ use moleucle_3dview_rs::{
     Molecule,
     MoleculeViewer,
     OffscreenRenderer,
+    RenderStyle,
     SelectedAtomRender,
 };
 use std::path::Path;
@@ -53,6 +54,13 @@ impl eframe::App for SimpleViewerApp {
         egui::TopBottomPanel::top("help").show(ctx, |ui| {
             ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
             ui.label(format!("Selected atoms: {:?}", self.viewer.selected_atoms()));
+            ui.horizontal(|ui| {
+                ui.label("Style:");
+                let mut style = self.offscreen.render_style();
+                ui.selectable_value(&mut style, RenderStyle::BallStick, "BallStick");
+                ui.selectable_value(&mut style, RenderStyle::Wireframe, "Wireframe");
+                self.offscreen.set_render_style(style);
+            });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
