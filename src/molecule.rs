@@ -113,39 +113,48 @@ impl Molecule {
         let mut atoms = Vec::new();
         let mut bonds = Vec::new();
 
+        // Pre-allocate with reasonable capacity
+        atoms.reserve(256); // Common for small-medium molecules
+        bonds.reserve(256);
+
         let mut section = "";
 
         for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
 
-            if line.starts_with("@<TRIPOS>") {
-                section = line;
+            if trimmed.starts_with("@<TRIPOS>") {
+                section = trimmed;
                 continue;
             }
 
             match section {
                 "@<TRIPOS>ATOM" => {
                     // id name x y z type ...
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 6 {
-                        if let (Ok(x), Ok(y), Ok(z)) = (
-                            parts[2].parse::<f32>(),
-                            parts[3].parse::<f32>(),
-                            parts[4].parse::<f32>(),
-                        ) {
-                            // Type often "C.ar", "H", etc. Take first char or split by dot.
-                            // let element = parts[1].chars().next().map(|c| c.to_string()).unwrap_or("?".to_string()); // Unused
-                            // Better: use the type field parts[5]
-                            let type_str = parts[5];
-                            let element = type_str.split('.').next().unwrap_or("?").to_uppercase();
+                    let mut parts = trimmed.split_whitespace();
+                    // Skip id (parts[0])
+                    let _ = parts.next();
+                    // Skip name (parts[1])
+                    let _ = parts.next();
+
+                    if let (Some(x_str), Some(y_str), Some(z_str)) =
+                        (parts.next(), parts.next(), parts.next())
+                    {
+                        if let (Ok(x), Ok(y), Ok(z)) =
+                            (x_str.parse::<f32>(), y_str.parse::<f32>(), z_str.parse::<f32>())
+                        {
+                            let element = parts
+                                .next()
+                                .and_then(|type_str| type_str.split('.').next())
+                                .map(|s| s.to_uppercase())
+                                .unwrap_or_else(|| "?".to_string());
 
                             atoms.push(Atom {
                                 position: Vec3::new(x, y, z),
                                 element,
-                                id: atoms.len() + 1, // 1-based usually in file, but we use index
+                                id: atoms.len() + 1,
                                 name: None,
                                 res_name: None,
                                 chain_id: None,
@@ -159,25 +168,28 @@ impl Molecule {
                 }
                 "@<TRIPOS>BOND" => {
                     // id atom1 atom2 type ...
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 4 {
-                        if let (Ok(a_id), Ok(b_id)) =
-                            (parts[1].parse::<usize>(), parts[2].parse::<usize>())
-                        {
-                            let order = match parts[3] {
-                                "2" => 2,
-                                "3" => 3,
-                                "ar" => 1, // aromatic, often drawn as 1.5 or 1
-                                _ => 1,
-                            };
-                            // Adjust 1-based to 0-based
-                            if a_id > 0 && b_id > 0 && a_id <= atoms.len() && b_id <= atoms.len() {
-                                bonds.push(Bond {
-                                    atom_a: a_id - 1,
-                                    atom_b: b_id - 1,
-                                    order,
-                                });
-                            }
+                    let mut parts = trimmed.split_whitespace();
+                    // Skip id (parts[0])
+                    let _ = parts.next();
+
+                    let a_id: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                    let b_id: Option<usize> = parts.next().and_then(|s| s.parse().ok());
+                    
+                    if let (Some(a_id), Some(b_id)) = (a_id, b_id) {
+                        let order = match parts.next() {
+                            Some("2") => 2u8,
+                            Some("3") => 3u8,
+                            Some("ar") => 1u8,
+                            _ => 1u8,
+                        };
+                        
+                        // Adjust 1-based to 0-based
+                        if a_id > 0 && b_id > 0 && a_id <= atoms.len() && b_id <= atoms.len() {
+                            bonds.push(Bond {
+                                atom_a: a_id - 1,
+                                atom_b: b_id - 1,
+                                order,
+                            });
                         }
                     }
                 }
@@ -195,30 +207,39 @@ impl Molecule {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut atom_records = Vec::new();
         let mut conect_bonds = Vec::new();
+        
+        // Pre-allocate with typical capacities
+        atom_records.reserve(256);
+        conect_bonds.reserve(256);
 
         for line in content.lines() {
-            if line.starts_with("ATOM") || line.starts_with("HETATM") {
-                if let Some(record) = AtomRecord::from_line(line) {
-                    atom_records.push(record);
+            match &line[..std::cmp::min(6, line.len())] {
+                "ATOM  " | "HETATM" => {
+                    if let Some(record) = AtomRecord::from_line(line) {
+                        atom_records.push(record);
+                    }
                 }
-            } else if line.starts_with("CONECT") {
-                // Parse CONECT records for explicit bond information
-                if line.len() >= 11 {
-                    if let Ok(atom1) = line[6..11].trim().parse::<usize>() {
-                        // CONECT records can have multiple bonded atoms
-                        for i in 0..4 {
-                            let start = 11 + i * 5;
-                            let end = start + 5;
-                            if end <= line.len() {
-                                if let Ok(atom2) = line[start..end].trim().parse::<usize>() {
-                                    if atom1 != 0 && atom2 != 0 && atom1 < atom2 {
-                                        conect_bonds.push((atom1 - 1, atom2 - 1)); // Convert to 0-based
+                "CONECT" => {
+                    // Parse CONECT records for explicit bond information
+                    if line.len() >= 11 {
+                        if let Ok(atom1) = line[6..11].trim().parse::<usize>() {
+                            if atom1 > 0 {
+                                // CONECT records can have multiple bonded atoms
+                                for i in 0..4 {
+                                    let start = 11 + i * 5;
+                                    if start + 5 <= line.len() {
+                                        if let Ok(atom2) = line[start..start+5].trim().parse::<usize>() {
+                                            if atom2 > 0 && atom1 < atom2 {
+                                                conect_bonds.push((atom1 - 1, atom2 - 1)); // Convert to 0-based
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+                _ => {}
             }
         }
 
@@ -258,15 +279,18 @@ impl Molecule {
 
         // Use explicit bonds if available, otherwise infer from distances
         let bonds = if !conect_bonds.is_empty() {
-            conect_bonds
-                .into_iter()
-                .filter(|(a, b)| *a < atoms.len() && *b < atoms.len())
-                .map(|(a, b)| Bond {
-                    atom_a: a,
-                    atom_b: b,
-                    order: 1,
-                })
-                .collect()
+            let mut result = Vec::new();
+            result.reserve(conect_bonds.len());
+            for (a, b) in conect_bonds {
+                if a < atoms.len() && b < atoms.len() {
+                    result.push(Bond {
+                        atom_a: a,
+                        atom_b: b,
+                        order: 1,
+                    });
+                }
+            }
+            result
         } else {
             Self::infer_bonds(&atoms)
         };
@@ -274,23 +298,39 @@ impl Molecule {
         Ok(Molecule { atoms, bonds })
     }
 
-    /// Infer bonds based on van der Waals radii
+    /// Infer bonds based on van der Waals radii (optimized)
     fn infer_bonds(atoms: &[Atom]) -> Vec<Bond> {
         let mut bonds = Vec::new();
-        const BOND_DISTANCE_FACTOR: f32 = 1.6; // Tolerance factor for bond detection
+        const BOND_DISTANCE_FACTOR: f32 = 1.6;
+        const BOND_DISTANCE_FACTOR_SQ: f32 = BOND_DISTANCE_FACTOR * BOND_DISTANCE_FACTOR;
+        const MIN_DISTANCE: f32 = 0.01;
+        const MIN_DISTANCE_SQ: f32 = MIN_DISTANCE * MIN_DISTANCE;
+
+        // Pre-allocate with estimated capacity
+        bonds.reserve(atoms.len() * 2); // Typical atom has ~2 bonds
 
         for i in 0..atoms.len() {
-            for j in (i + 1)..atoms.len() {
-                let dist = (atoms[i].position - atoms[j].position).magnitude();
-                let expected_dist = get_vdw_radius(&atoms[i].element)
-                    + get_vdw_radius(&atoms[j].element);
+            let pos_i = atoms[i].position;
+            let radius_i = get_vdw_radius(&atoms[i].element);
 
-                // Check if atoms are within bonding distance
-                if dist < expected_dist * BOND_DISTANCE_FACTOR && dist > 0.1 {
+            for j in (i + 1)..atoms.len() {
+                let pos_j = atoms[j].position;
+                let diff = pos_j - pos_i;
+                let dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+
+                // Early exit if too far
+                if dist_sq < MIN_DISTANCE_SQ {
+                    continue;
+                }
+
+                let expected_dist = radius_i + get_vdw_radius(&atoms[j].element);
+                let max_dist_sq = expected_dist * expected_dist * BOND_DISTANCE_FACTOR_SQ;
+
+                if dist_sq < max_dist_sq {
                     bonds.push(Bond {
                         atom_a: i,
                         atom_b: j,
-                        order: 1, // Default to single bond
+                        order: 1,
                     });
                 }
             }

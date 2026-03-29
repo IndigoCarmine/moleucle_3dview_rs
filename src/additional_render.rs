@@ -41,22 +41,33 @@ impl SelectedAtomRender {
 
 impl AdditionalRender for SelectedAtomRender {
     fn update_scene(&self, scene: &mut Scene, molecule: &Molecule) {
+        if self.selected_atoms.is_empty() {
+            return;
+        }
+        
+        // Create mesh once and reuse it
+        let cyl_mesh = Mesh::new_cylinder(1.0, 1.0, 10);
+        let cyl_idx = scene.meshes.len();
+        scene.meshes.push(cyl_mesh);
+        
+        let radius = 0.6;
+        let color = (self.color[0], self.color[1], self.color[2]);
+        let orient = Quaternion::new_identity();
+        
+        // Pre-allocate entity space
+        scene.entities.reserve(self.selected_atoms.len());
+        
         for atom_idx in self.selected_atoms.iter() {
-            let atom = molecule.atoms.get(*atom_idx).unwrap();
-            let pos = Vec3::new(atom.position.x, atom.position.y, atom.position.z);
-            let radius = 0.4 + 0.2;
-            let color = self.color;
-            let cyl_mesh = Mesh::new_cylinder(1.0, 1.0, 10);
-            let cyl_idx = scene.meshes.len();
-            scene.meshes.push(cyl_mesh);
-            scene.entities.push(Entity::new(
-                cyl_idx,
-                pos,
-                Quaternion::new_identity(),
-                radius,
-                (color[0], color[1], color[2]),
-                0.2,
-            ));
+            if let Some(atom) = molecule.atoms.get(*atom_idx) {
+                scene.entities.push(Entity::new(
+                    cyl_idx,
+                    atom.position,
+                    orient,
+                    radius,
+                    color,
+                    0.2,
+                ));
+            }
         }
     }
     
@@ -68,18 +79,22 @@ impl AdditionalRender for SelectedAtomRender {
 
 impl SelectedAtomRender {
     pub fn add_atom(&mut self, atom_idx: usize) {
-        self.selected_atoms.push(atom_idx);
+        if !self.selected_atoms.contains(&atom_idx) {
+            self.selected_atoms.push(atom_idx);
+        }
     }
 
     pub fn remove_atom(&mut self, atom_idx: usize) {
-        self.selected_atoms.retain(|&x| x != atom_idx);
+        if let Some(pos) = self.selected_atoms.iter().position(|&x| x == atom_idx) {
+            self.selected_atoms.remove(pos);
+        }
     }
 
     pub fn toggle_atom(&mut self, atom_idx: usize) {
-        if self.selected_atoms.contains(&atom_idx) {
-            self.remove_atom(atom_idx);
+        if let Some(pos) = self.selected_atoms.iter().position(|&x| x == atom_idx) {
+            self.selected_atoms.remove(pos);
         } else {
-            self.add_atom(atom_idx);
+            self.selected_atoms.push(atom_idx);
         }
     }
 }

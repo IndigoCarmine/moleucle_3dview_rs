@@ -296,7 +296,13 @@ impl OffscreenRenderer {
     }
 
     fn build_ballstick_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
-        let mut vertices = Vec::new();
+        let mut vertices = if let Some(mol) = molecule {
+            // Estimate capacity: bonds * ~50 vertices + atoms * ~200 vertices + axes * ~75 vertices
+            let capacity = mol.bonds.len() * 50 + mol.atoms.len() * 200 + 225;
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::with_capacity(225) // Just axes
+        };
 
         if let Some(mol) = molecule {
             let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
@@ -389,7 +395,14 @@ impl OffscreenRenderer {
     }
 
     fn build_wireframe_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
-        let mut vertices = Vec::new();
+        let mut vertices = if let Some(mol) = molecule {
+            // Estimate capacity: bonds * ~4 + atoms * ~6 + axes * ~6
+            // This is much less than ballstick since we're only adding lines
+            let capacity = mol.bonds.len() * 4 + mol.atoms.len() * 6 + 6;
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::with_capacity(6) // Just axes
+        };
 
         if let Some(mol) = molecule {
             let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
@@ -806,8 +819,11 @@ struct RenderMesh {
 
 impl RenderMesh {
     fn new_sphere_uv(radius: f32, lat_segments: usize, lon_segments: usize) -> Self {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let vertex_count = (lat_segments + 1) * (lon_segments + 1);
+        let index_count = lat_segments * lon_segments * 6; // 2 triangles per quad
+        
+        let mut vertices = Vec::with_capacity(vertex_count);
+        let mut indices = Vec::with_capacity(index_count);
 
         for lat in 0..=lat_segments {
             let v = lat as f32 / lat_segments as f32;
@@ -841,8 +857,12 @@ impl RenderMesh {
                 let i2 = i0 + row;
                 let i3 = i2 + 1;
 
-                indices.extend_from_slice(&[i0, i2, i1]);
-                indices.extend_from_slice(&[i1, i2, i3]);
+                indices.push(i0);
+                indices.push(i2);
+                indices.push(i1);
+                indices.push(i1);
+                indices.push(i2);
+                indices.push(i3);
             }
         }
 
@@ -850,8 +870,12 @@ impl RenderMesh {
     }
 
     fn new_cylinder(len: f32, radius: f32, sides: usize) -> Self {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        // Pre-calculate capacities
+        let vertex_capacity = sides * 2 + 2; // Side vertices + 2 center vertices
+        let index_capacity = sides * 12; // Side quads (2 triangles each) + caps (2 triangles each)
+        
+        let mut vertices = Vec::with_capacity(vertex_capacity);
+        let mut indices = Vec::with_capacity(index_capacity);
         let half = len * 0.5;
 
         for i in 0..sides {
@@ -878,8 +902,12 @@ impl RenderMesh {
             let top1 = next * 2;
             let bot1 = top1 + 1;
 
-            indices.extend_from_slice(&[top0, bot0, top1]);
-            indices.extend_from_slice(&[top1, bot0, bot1]);
+            indices.push(top0);
+            indices.push(bot0);
+            indices.push(top1);
+            indices.push(top1);
+            indices.push(bot0);
+            indices.push(bot1);
         }
 
         let top_center = vertices.len();
@@ -900,8 +928,12 @@ impl RenderMesh {
             let bot0 = top0 + 1;
             let bot1 = top1 + 1;
 
-            indices.extend_from_slice(&[top_center, top1, top0]);
-            indices.extend_from_slice(&[bottom_center, bot0, bot1]);
+            indices.push(top_center);
+            indices.push(top1);
+            indices.push(top0);
+            indices.push(bottom_center);
+            indices.push(bot0);
+            indices.push(bot1);
         }
 
         Self { vertices, indices }

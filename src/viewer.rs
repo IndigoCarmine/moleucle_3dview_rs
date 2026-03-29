@@ -72,9 +72,8 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
         if let Some(mol) = &self.molecule {
             // Check Atoms
             for (i, atom) in mol.atoms.iter().enumerate() {
-                let pos = Vec3::new(atom.position.x, atom.position.y, atom.position.z);
                 let radius = 0.4; // Must match update_scene
-                if let Some(t) = Self::ray_sphere_intersect(ray_origin, ray_dir, pos, radius) {
+                if let Some(t) = Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius) {
                     if t < closest_t && t > 0.0 {
                         closest_t = t;
                         picked = Some(ViewerEvent::AtomClicked(i));
@@ -84,10 +83,8 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
 
             // Check Bonds
             for (i, bond) in mol.bonds.iter().enumerate() {
-                let a = mol.atoms[bond.atom_a].position;
-                let b = mol.atoms[bond.atom_b].position;
-                let p1 = Vec3::new(a.x, a.y, a.z);
-                let p2 = Vec3::new(b.x, b.y, b.z);
+                let p1 = mol.atoms[bond.atom_a].position;
+                let p2 = mol.atoms[bond.atom_b].position;
                 let radius = 0.15; // Must match update_scene
 
                 if let Some(t) = Self::ray_cylinder_intersect(ray_origin, ray_dir, p1, p2, radius) {
