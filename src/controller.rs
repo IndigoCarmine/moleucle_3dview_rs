@@ -1,14 +1,35 @@
 use crate::{
     additional_render::AdditionalRender,
     camera::Camera,
+    scene_types::Scene,
     viewer::{MoleculeViewer, ViewerEvent},
 };
-use graphics::winit::keyboard::{KeyCode, PhysicalKey};
-use graphics::{
-    winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
-    EngineUpdates, Scene,
-};
 use lin_alg::f32::Vec2;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
+
+#[derive(Clone, Copy, Debug)]
+pub enum EntityUpdate {
+    None,
+    All,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EngineUpdates {
+    pub meshes: bool,
+    pub entities: EntityUpdate,
+    pub camera: bool,
+}
+
+impl Default for EngineUpdates {
+    fn default() -> Self {
+        Self {
+            meshes: false,
+            entities: EntityUpdate::None,
+            camera: false,
+        }
+    }
+}
 
 pub struct CameraController<T: Camera + Default> {
     pub camera: Box<T>,

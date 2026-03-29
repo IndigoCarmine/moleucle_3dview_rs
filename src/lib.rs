@@ -1,7 +1,6 @@
 //! A lightweight 3D molecule visualization library.
 //!
-//! This crate provides a `MoleculeViewer` struct that relies on the `graphics` crate (WGPU-based)
-//! to render molecules loaded via `bio_files`.
+//! This crate provides a `MoleculeViewer` struct for rendering molecule data loaded via `bio_files`.
 //!
 //! # Example
 //!
@@ -28,10 +27,16 @@ pub mod additional_render;
 pub mod camera;
 pub mod controller;
 pub mod molecule;
+pub mod offscreen_renderer;
+pub mod scene_types;
+pub mod ui;
 pub mod viewer;
 
 pub use additional_render::{AdditionalRender, SelectedAtomRender, DebugRender};
 pub use camera::{Camera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
 pub use molecule::Molecule;
+pub use offscreen_renderer::OffscreenRenderer;
+pub use scene_types::{Entity, Mesh, Scene};
+pub use ui::ViewerUiComponent;
 pub use viewer::MoleculeViewer;

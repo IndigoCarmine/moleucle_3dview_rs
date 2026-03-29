@@ -1,5 +1,5 @@
 use crate::molecule::Molecule;
-use graphics::{Entity, Mesh, Scene};
+use crate::scene_types::{Entity, Mesh, Scene};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;
 use std::any::Any;
@@ -24,6 +24,18 @@ impl SelectedAtomRender {
             selected_atoms: Vec::new(),
             color: [1.0, 0.0, 0.0],
         }
+    }
+
+    pub fn selected_atoms(&self) -> &[usize] {
+        &self.selected_atoms
+    }
+
+    pub fn set_selected_atoms(&mut self, atom_indices: Vec<usize>) {
+        self.selected_atoms = atom_indices;
+    }
+
+    pub fn clear_selected_atoms(&mut self) {
+        self.selected_atoms.clear();
     }
 }
 

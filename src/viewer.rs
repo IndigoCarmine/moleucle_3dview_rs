@@ -1,6 +1,6 @@
 use crate::molecule::Molecule;
-use crate::AdditionalRender;
-use graphics::{Entity, Mesh, Scene};
+use crate::scene_types::{Entity, Mesh, Scene};
+use crate::{AdditionalRender, SelectedAtomRender};
 use lin_alg::f32::{Quaternion, Vec3};
 
 #[derive(Debug, Clone)]
@@ -264,6 +264,29 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             if let Some(additional_render) = &self.additional_render {
                 additional_render.update_scene(scene, mol);
             }
+        }
+    }
+}
+
+impl MoleculeViewer<SelectedAtomRender> {
+    pub fn selected_atoms(&self) -> Vec<usize> {
+        self.additional_render
+            .as_ref()
+            .map(|render| render.selected_atoms().to_vec())
+            .unwrap_or_default()
+    }
+
+    pub fn set_selected_atoms(&mut self, atom_indices: Vec<usize>) {
+        if let Some(render) = self.additional_render.as_mut() {
+            render.set_selected_atoms(atom_indices);
+            self.dirty = true;
+        }
+    }
+
+    pub fn clear_selected_atoms(&mut self) {
+        if let Some(render) = self.additional_render.as_mut() {
+            render.clear_selected_atoms();
+            self.dirty = true;
         }
     }
 }
