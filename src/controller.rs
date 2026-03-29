@@ -137,21 +137,12 @@ impl<T: Camera + Default> CameraController<T> {
 
     /// Synchronize camera state into rendering scene.
     pub fn update_scene_camera(&self, scene: &mut Scene) {
-        let pos = self.camera.position();
-        let target = self.camera.target();
+                let pos = self.camera.position();
 
         // Bridge nalgebra to lin_alg
         scene.camera.position = lin_alg::f32::Vec3::new(pos.x, pos.y, pos.z);
-
-        // Calculate orientation
-        let fwd = (target - pos).normalize();
-        // Assuming default forward is (0,0,1) or (0,0,-1).
-        // WGPU often uses +Z or -Z.
-        // Let's use from_unit_vecs similarly to how viewer.rs handles cylinders.
-        scene.camera.orientation = lin_alg::f32::Quaternion::from_unit_vecs(
-            lin_alg::f32::Vec3::new(0.0, 0.0, 1.0),
-            lin_alg::f32::Vec3::new(fwd.x, fwd.y, fwd.z),
-        );
+        let  rot = self.camera.camera_rotation();
+        scene.camera.orientation = lin_alg::f32::Quaternion::new(rot.w, rot.i, rot.j, rot.k);
 
         scene.camera.fov_y = self.camera.fov_y();
         scene.camera.near = self.camera.near();

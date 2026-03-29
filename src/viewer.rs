@@ -220,6 +220,49 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
                 scene.entities.push(entity);
             }
 
+            // draw xyz axes for debugging
+            let axis_len = 2.0;
+            let axis_radius = 0.05;
+
+            // X axis Color Red
+            let mut x_axis = Entity::new(
+                cyl_idx,
+                Vec3::new(axis_len / 2.0, 0.0, 0.0),
+                Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
+                1.0,
+                (1.0, 0.0, 0.0),
+                0.1,
+            );
+            x_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
+            scene.entities.push(x_axis);
+
+            // Y axis Color Green
+            let mut y_axis = Entity::new(
+                cyl_idx,
+                Vec3::new(0.0, axis_len / 2.0, 0.0),
+                Quaternion::new_identity(),
+                1.0,
+                (0.0, 1.0, 0.0),
+                0.1,
+            );
+            y_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
+            scene.entities.push(y_axis);
+
+            // Z axis   Color Blue
+            let mut z_axis = Entity::new(
+                cyl_idx,
+                Vec3::new(0.0, 0.0, axis_len / 2.0),
+                Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                1.0,
+                (0.0, 0.0, 1.0),
+                0.1,
+            );
+            z_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
+            scene.entities.push(z_axis);
+
+
+
+
             if let Some(additional_render) = &self.additional_render {
                 additional_render.update_scene(scene, mol);
             }

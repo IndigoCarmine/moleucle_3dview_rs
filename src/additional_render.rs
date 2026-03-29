@@ -2,11 +2,14 @@ use crate::molecule::Molecule;
 use graphics::{Entity, Mesh, Scene};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;
+use std::any::Any;
 
 
 // for adding rendering works to MoleculeViewer.
-pub trait AdditionalRender {
+pub trait AdditionalRender: Send {
     fn update_scene(&self, scene: &mut Scene, molecule: &Molecule);
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 #[derive(Clone)]
@@ -44,7 +47,10 @@ impl AdditionalRender for SelectedAtomRender {
             ));
         }
     }
-
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 
@@ -69,34 +75,87 @@ impl SelectedAtomRender {
 
 pub struct DebugRender {
     pub ray: (Vec3, Vec3),
+    pub ray_length: f32,
+    pub ray_color: (f32, f32, f32),
    
 }
     
 impl DebugRender {
     pub fn new(ray: (Vec3, Vec3)) -> Self {
-        Self { ray }
+        Self {
+            ray,
+            ray_length: 100.0,
+            ray_color: (0.0, 1.0, 0.0), // Default green color
+        }
+    }
+    
+    /// Create a debug renderer with custom ray length
+    pub fn with_length(ray: (Vec3, Vec3), length: f32) -> Self {
+        Self {
+            ray,
+            ray_length: length,
+            ray_color: (0.0, 1.0, 0.0),
+        }
+    }
+    
+    /// Create a debug renderer with custom color
+    pub fn with_color(ray: (Vec3, Vec3), color: (f32, f32, f32)) -> Self {
+        Self {
+            ray,
+            ray_length: 100.0,
+            ray_color: color,
+        }
+    }
+    
+    pub fn set_ray_length(&mut self, length: f32) {
+        self.ray_length = length;
+    }
+    
+    pub fn set_ray_color(&mut self, color: (f32, f32, f32)) {
+        self.ray_color = color;
     }
 }
 
 impl AdditionalRender for DebugRender {
-    fn update_scene(&self, _scene: &mut Scene, _molecule: &Molecule) {
-        // For debugging purposes, we can add some simple geometry or text here.
-        // For example, we could render the coordinate axes or display some text info.
-        
-        // draw ray
+    fn update_scene(&self, scene: &mut Scene, _molecule: &Molecule) {
+        // Draw debug ray as a thin cylinder
         let (origin, direction) = self.ray;
-        let ray_mesh = Mesh::new_cylinder(0.05, 1.0, 10);
-        let ray_idx = _scene.meshes.len();
-        _scene.meshes.push(ray_mesh);
-        _scene.entities.push(Entity::new(
+        
+        // Normalize direction
+        let normalized_dir = direction.to_normalized();
+        let ray_radius = 0.05;  // Thin cylinder for visualization
+        
+        // Calculate midpoint of the ray
+        let ray_end = origin + normalized_dir * self.ray_length;
+        let midpoint = (origin + ray_end) * 0.5;
+        
+        // Create cylinder mesh
+        let ray_mesh = Mesh::new_cylinder(1.0, 1.0, 8);
+        let ray_idx = scene.meshes.len();
+        scene.meshes.push(ray_mesh);
+        
+        // Quaternion to rotate from Y-axis (default cylinder orientation) to ray direction
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let orientation = Quaternion::from_unit_vecs(up, normalized_dir);
+        
+        // Create entity with proper scaling
+        let mut ray_entity = Entity::new(
             ray_idx,
-            origin,
-            Quaternion::new_identity(),
+            midpoint,
+            orientation,
             1.0,
-            (0.0, 1.0, 0.0),
-            0.2,
-        ));
+            self.ray_color,
+            0.1,
+        );
+        
+        // Apply scale_partial to set cylinder dimensions
+        // X and Z are radii, Y is length
+        ray_entity.scale_partial = Some(Vec3::new(ray_radius, self.ray_length, ray_radius));
+        scene.entities.push(ray_entity);
+    }
 
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
