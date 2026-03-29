@@ -1,25 +1,28 @@
 //! A lightweight 3D molecule visualization library.
 //!
-//! This crate provides a `MoleculeViewer` struct for rendering molecule data loaded via `bio_files`.
+//! This crate provides a `MoleculeViewer` struct for rendering molecule data in MOL2 and PDB formats.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use graphics::{run, Scene, UiSettings, GraphicsSettings, EngineUpdates, EntityUpdate, ControlScheme};
-//! use lin_alg::f32::Vec3;
-//! use moleucle_3dview_rs::{Molecule, MoleculeViewer, DebugRender, AdditionalRender};
+//! use moleucle_3dview_rs::{Molecule, MoleculeViewer, SelectedAtomRender};
 //! use std::path::Path;
 //!
 //! fn main() {
-//!     let mut viewer = MoleculeViewer::new();
-//!     // viewer.set_molecule(Molecule::from_mol2(Path::new("Benzene.mol2")).unwrap());
+//!     // Load a molecule from MOL2 or PDB file
+//!     let mol = Molecule::from_mol2(Path::new("Benzene.mol2"))
+//!         .or_else(|_| Molecule::from_pdb(Path::new("protein.pdb")))
+//!         .expect("Failed to load molecule");
 //!
-//!     let mut scene = Scene::default();
-//!     scene.camera.position = Vec3::new(0.0, 0.0, -10.0);
+//!     // Create a viewer
+//!     let mut viewer: MoleculeViewer<SelectedAtomRender> = MoleculeViewer::new();
+//!     viewer.set_molecule(mol);
 //!
-//!     viewer.update_scene(&mut scene);
-//!    
-//!     // ... standard graphics::run loop setup
+//!     // Access molecule data
+//!     if let Some(molecule) = &viewer.molecule {
+//!         println!("Atoms: {}", molecule.atoms.len());
+//!         println!("Bonds: {}", molecule.bonds.len());
+//!     }
 //! }
 //! ```
 
@@ -35,8 +38,8 @@ pub mod viewer;
 pub use additional_render::{AdditionalRender, SelectedAtomRender, DebugRender};
 pub use camera::{Camera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
-pub use molecule::Molecule;
+pub use molecule::{Molecule, Atom, AtomRecord};
 pub use offscreen_renderer::{OffscreenRenderer, RenderStyle};
 pub use scene_types::{Entity, Mesh, Scene};
 pub use ui::ViewerUiComponent;
-pub use viewer::MoleculeViewer;
+pub use viewer::{MoleculeViewer, ColorFn, default_color_fn};

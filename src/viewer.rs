@@ -1,4 +1,4 @@
-use crate::molecule::Molecule;
+use crate::molecule::{Atom, Molecule};
 use crate::scene_types::{Entity, Mesh, Scene};
 use crate::{AdditionalRender, SelectedAtomRender};
 use lin_alg::f32::{Quaternion, Vec3};
@@ -10,10 +10,28 @@ pub enum ViewerEvent {
     NothingClicked,
 }
 
+/// Color function type: takes Atom and is_selected flag, returns RGB color
+pub type ColorFn = fn(&Atom, bool) -> (f32, f32, f32);
+
+/// Default color function based on element type
+pub fn default_color_fn(atom: &Atom, _is_selected: bool) -> (f32, f32, f32) {
+    match atom.element.as_str() {
+        "C" => (0.1, 0.1, 0.1),  // Black/Dark Grey
+        "H" => (0.9, 0.9, 0.9),  // White
+        "O" => (0.9, 0.1, 0.1),  // Red
+        "N" => (0.1, 0.1, 0.9),  // Blue
+        "S" => (0.9, 0.9, 0.1),  // Yellow
+        "P" => (1.0, 0.6, 0.0),  // Orange
+        "Cl" => (0.1, 0.9, 0.1), // Green
+        _ => (0.7, 0.7, 0.7),    // Grey
+    }
+}
+
 pub struct MoleculeViewer<T: AdditionalRender> {
     pub molecule: Option<Molecule>,
     pub dirty: bool,
     pub additional_render: Option<Box<T>>,
+    pub color_fn: ColorFn,
 }
 
 impl<T: AdditionalRender> MoleculeViewer<T> {
@@ -22,7 +40,24 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             molecule: None,
             dirty: false,
             additional_render: None,
+            color_fn: default_color_fn,
         }
+    }
+
+    /// Create a new MoleculeViewer with a custom color function
+    pub fn with_color_fn(color_fn: ColorFn) -> Self {
+        Self {
+            molecule: None,
+            dirty: false,
+            additional_render: None,
+            color_fn,
+        }
+    }
+
+    /// Set the color function
+    pub fn set_color_fn(&mut self, color_fn: ColorFn) {
+        self.color_fn = color_fn;
+        self.dirty = true;
     }
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
@@ -149,16 +184,8 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
                 // Convert atom position to graphics Vec3.
                 let pos = Vec3::new(atom.position.x, atom.position.y, atom.position.z);
 
-                let color = match atom.element.as_str() {
-                    "C" => (0.1, 0.1, 0.1),  // Black/Dark Grey
-                    "H" => (0.9, 0.9, 0.9),  // White
-                    "O" => (0.9, 0.1, 0.1),  // Red
-                    "N" => (0.1, 0.1, 0.9),  // Blue
-                    "S" => (0.9, 0.9, 0.1),  // Yellow
-                    "P" => (1.0, 0.6, 0.0),  // Orange
-                    "Cl" => (0.1, 0.9, 0.1), // Green
-                    _ => (0.7, 0.7, 0.7),    // Grey
-                };
+                // Use custom color function
+                let color = (self.color_fn)(atom, false);
 
                 let radius = 0.4; // Base radius
 
