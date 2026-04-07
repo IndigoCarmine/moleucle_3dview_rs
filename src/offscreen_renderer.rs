@@ -1,3 +1,4 @@
+use crate::viewer::ColorFn;
 use crate::Molecule;
 use egui::TextureId;
 use egui_wgpu::wgpu;
@@ -42,9 +43,7 @@ pub struct OffscreenRenderer {
     mesh_resolution: usize,
     render_style: RenderStyle,
     color_texture: Option<wgpu::Texture>,
-    color_view: Option<wgpu::TextureView>,
     depth_texture: Option<wgpu::Texture>,
-    depth_view: Option<wgpu::TextureView>,
     texture_id: Option<TextureId>,
     gpu: Option<GpuResources>,
     sphere_mesh: RenderMesh,
@@ -68,9 +67,7 @@ impl OffscreenRenderer {
             mesh_resolution,
             render_style: RenderStyle::BallStick,
             color_texture: None,
-            color_view: None,
             depth_texture: None,
-            depth_view: None,
             texture_id: None,
             gpu: None,
             sphere_mesh: RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon),
@@ -118,7 +115,7 @@ impl OffscreenRenderer {
             self.gpu = Some(create_gpu_resources(&render_state.device));
         }
 
-        let needs_rebuild = self.color_view.is_none() || self.width != width || self.height != height;
+        let needs_rebuild = self.color_texture.is_none() || self.width != width || self.height != height;
         if needs_rebuild {
             self.width = width;
             self.height = height;
@@ -134,17 +131,21 @@ impl OffscreenRenderer {
         molecule: Option<&Molecule>,
         selected_atoms: &[usize],
         view_proj: [f32; 16],
+        color_fn: ColorFn,
     ) -> Result<(), String> {
-        let color_view = self
-            .color_view
+        let color_texture = self
+            .color_texture
             .as_ref()
-            .ok_or_else(|| "Offscreen color view is not initialized".to_string())?;
-        let depth_view = self
-            .depth_view
+            .ok_or_else(|| "Offscreen color texture is not initialized".to_string())?;
+        let depth_texture = self
+            .depth_texture
             .as_ref()
-            .ok_or_else(|| "Offscreen depth view is not initialized".to_string())?;
+            .ok_or_else(|| "Offscreen depth texture is not initialized".to_string())?;
 
-        let vertices = self.build_scene_vertices(molecule, selected_atoms);
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let vertices = self.build_scene_vertices(molecule, selected_atoms, color_fn);
 
         let gpu = self
             .gpu
@@ -181,7 +182,7 @@ impl OffscreenRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("offscreen-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
+                    view: &color_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -195,7 +196,7 @@ impl OffscreenRenderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
+                    view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -262,7 +263,6 @@ impl OffscreenRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         {
             let mut renderer = render_state.renderer.write();
@@ -283,19 +283,27 @@ impl OffscreenRenderer {
         }
 
         self.color_texture = Some(color_texture);
-        self.color_view = Some(color_view);
         self.depth_texture = Some(depth_texture);
-        self.depth_view = Some(depth_view);
     }
 
-    fn build_scene_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
+    fn build_scene_vertices(
+        &self,
+        molecule: Option<&Molecule>,
+        selected_atoms: &[usize],
+        color_fn: ColorFn,
+    ) -> Vec<Vertex> {
         match self.render_style {
-            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, selected_atoms),
-            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, selected_atoms),
+            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, selected_atoms, color_fn),
+            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, selected_atoms, color_fn),
         }
     }
 
-    fn build_ballstick_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
+    fn build_ballstick_vertices(
+        &self,
+        molecule: Option<&Molecule>,
+        selected_atoms: &[usize],
+        color_fn: ColorFn,
+    ) -> Vec<Vertex> {
         let mut vertices = if let Some(mol) = molecule {
             // Estimate capacity: bonds * ~50 vertices + atoms * ~200 vertices + axes * ~75 vertices
             let capacity = mol.bonds.len() * 50 + mol.atoms.len() * 200 + 225;
@@ -346,11 +354,8 @@ impl OffscreenRenderer {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
                 let radius = if selected_this { 0.56 } else { 0.40 };
-                let color = if selected_this {
-                    [1.0, 0.35, 0.10]
-                } else {
-                    element_color(&atom.element)
-                };
+                let color_tuple = color_fn(atom, selected_this);
+                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
                 append_mesh_triangles(
                     &mut vertices,
@@ -394,7 +399,12 @@ impl OffscreenRenderer {
         vertices
     }
 
-    fn build_wireframe_vertices(&self, molecule: Option<&Molecule>, selected_atoms: &[usize]) -> Vec<Vertex> {
+    fn build_wireframe_vertices(
+        &self,
+        molecule: Option<&Molecule>,
+        selected_atoms: &[usize],
+        color_fn: ColorFn,
+    ) -> Vec<Vertex> {
         let mut vertices = if let Some(mol) = molecule {
             // Estimate capacity: bonds * ~4 + atoms * ~6 + axes * ~6
             // This is much less than ballstick since we're only adding lines
@@ -434,11 +444,8 @@ impl OffscreenRenderer {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
                 let span = if selected_this { 0.22 } else { 0.14 };
-                let color = if selected_this {
-                    [1.0, 0.35, 0.10]
-                } else {
-                    element_color(&atom.element)
-                };
+                let color_tuple = color_fn(atom, selected_this);
+                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
                 append_line(
                     &mut vertices,
@@ -736,19 +743,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         uniform_bind_group,
         vertex_buffer: None,
         vertex_count: 0,
-    }
-}
-
-fn element_color(element: &str) -> [f32; 3] {
-    match element {
-        "C" => [0.12, 0.12, 0.12],
-        "H" => [0.90, 0.90, 0.90],
-        "O" => [0.95, 0.15, 0.15],
-        "N" => [0.20, 0.30, 0.95],
-        "S" => [0.95, 0.85, 0.20],
-        "P" => [1.00, 0.55, 0.15],
-        "CL" => [0.10, 0.85, 0.20],
-        _ => [0.70, 0.70, 0.70],
     }
 }
 
