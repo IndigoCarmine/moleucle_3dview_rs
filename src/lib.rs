@@ -32,7 +32,6 @@ pub mod controller;
 pub mod molecule;
 pub mod offscreen_renderer;
 pub mod scene_types;
-pub mod ui;
 pub mod viewer;
 pub mod viewport;
 
@@ -42,6 +41,5 @@ pub use controller::CameraController;
 pub use molecule::{Molecule, Atom, AtomRecord};
 pub use offscreen_renderer::{OffscreenRenderer, RenderStyle};
 pub use scene_types::{Entity, Mesh, Scene};
-pub use ui::ViewerUiComponent;
 pub use viewer::{MoleculeViewer, ColorFn, default_color_fn};
 pub use viewport::InteractiveMoleculeViewport;

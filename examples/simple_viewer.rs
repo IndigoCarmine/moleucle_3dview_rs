@@ -9,34 +9,38 @@ use std::path::Path;
 struct SimpleViewerApp {
     viewport: InteractiveMoleculeViewport,
     render_state: Option<egui_wgpu::RenderState>,
+    startup_error: Option<String>,
 }
 
 impl SimpleViewerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut viewport = InteractiveMoleculeViewport::new();
-        load_default_molecule(&mut viewport);
+        let startup_error = match load_default_molecule() {
+            Ok(molecule) => {
+                viewport.set_molecule(molecule);
+                None
+            }
+            Err(err) => Some(err),
+        };
 
         Self {
             viewport,
             render_state: cc.wgpu_render_state.clone(),
+            startup_error,
         }
     }
 }
 
-fn load_default_molecule(viewport: &mut InteractiveMoleculeViewport) {
+fn load_default_molecule() -> Result<Molecule, String> {
     let path = Path::new("Benzene.mol2");
     if !path.exists() {
-        eprintln!("Benzene.mol2 not found at {:?}", std::env::current_dir());
-        return;
+        return Err(format!(
+            "Benzene.mol2 not found at {:?}",
+            std::env::current_dir().map_err(|err| err.to_string())?
+        ));
     }
 
-    match Molecule::from_mol2(path) {
-        Ok(mol) => {
-            println!("Loaded molecule with {} atoms", mol.atoms.len());
-            viewport.set_molecule(mol);
-        }
-        Err(_) => eprintln!("Failed to parse Benzene.mol2"),
-    }
+    Molecule::from_mol2(path).map_err(|err| format!("Failed to parse Benzene.mol2: {err}"))
 }
 
 impl eframe::App for SimpleViewerApp {
@@ -44,6 +48,9 @@ impl eframe::App for SimpleViewerApp {
         egui::TopBottomPanel::top("help").show(ctx, |ui| {
             ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
             ui.label(format!("Selected atoms: {:?}", self.viewport.selected_atoms()));
+            if let Some(err) = &self.startup_error {
+                ui.colored_label(egui::Color32::YELLOW, err);
+            }
             ui.horizontal(|ui| {
                 ui.label("Style:");
                 let mut style = self.viewport.render_style();

@@ -28,14 +28,6 @@ impl InteractiveMoleculeViewport {
         }
     }
 
-    pub fn viewer(&self) -> &MoleculeViewer<SelectedAtomRender> {
-        &self.viewer
-    }
-
-    pub fn viewer_mut(&mut self) -> &mut MoleculeViewer<SelectedAtomRender> {
-        &mut self.viewer
-    }
-
     pub fn set_molecule(&mut self, molecule: Molecule) {
         self.viewer.set_molecule(molecule);
     }
