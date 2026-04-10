@@ -7,17 +7,23 @@ use lin_alg::f32::{Quaternion, Vec3};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use wgpu::util::DeviceExt;
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
+const DEFAULT_BOND_CYLINDER_SIDES: usize = 12;
 const SAFE_MAX_VERTEX_BUFFER_BYTES: usize = 240 * 1024 * 1024;
 const MAX_RENDER_VERTICES: usize = SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<Vertex>();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LodSettings {
     pub enabled: bool,
-    pub high_detail_max_complexity: usize,
-    pub medium_detail_max_complexity: usize,
+    pub distance_check_fps: f32,
+    pub high_detail_max_distance: f32,
+    pub medium_detail_max_distance: f32,
     pub high_detail_mesh_resolution: usize,
     pub medium_detail_mesh_resolution: usize,
     pub low_detail_mesh_resolution: usize,
@@ -27,8 +33,9 @@ impl Default for LodSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            high_detail_max_complexity: 150,
-            medium_detail_max_complexity: 600,
+            distance_check_fps: 12.0,
+            high_detail_max_distance: 4.0,
+            medium_detail_max_distance: 10.0,
             high_detail_mesh_resolution: 14,
             medium_detail_mesh_resolution: 8,
             low_detail_mesh_resolution: 4,
@@ -36,11 +43,104 @@ impl Default for LodSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OffscreenRendererPreference {
     mesh_resolution: usize,
     lod_settings: LodSettings,
     render_style: RenderStyle,
+}
+
+struct LodDistanceWorker {
+    distance_tx: mpsc::Sender<f32>,
+    resolution_rx: mpsc::Receiver<usize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+    settings: Arc<Mutex<LodSettings>>,
+}
+
+impl LodDistanceWorker {
+    fn new(settings: Arc<Mutex<LodSettings>>) -> Self {
+        let (distance_tx, distance_rx) = mpsc::channel::<f32>();
+        let (resolution_tx, resolution_rx) = mpsc::channel::<usize>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker_settings = Arc::clone(&settings);
+
+        let handle = thread::spawn(move || {
+            let mut latest_distance = None;
+            let mut last_resolution = None;
+
+            while !worker_stop.load(Ordering::Relaxed) {
+                let interval = {
+                    let settings = worker_settings.lock().ok().map(|guard| *guard).unwrap_or_default();
+                    let fps = settings.distance_check_fps.max(1.0);
+                    Duration::from_secs_f32(1.0 / fps)
+                };
+
+                match distance_rx.recv_timeout(interval) {
+                    Ok(distance) => {
+                        latest_distance = Some(distance);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+
+                while let Ok(distance) = distance_rx.try_recv() {
+                    latest_distance = Some(distance);
+                }
+
+                let Some(distance) = latest_distance else {
+                    continue;
+                };
+
+                let settings = worker_settings.lock().ok().map(|guard| *guard).unwrap_or_default();
+                if !settings.enabled {
+                    continue;
+                }
+
+                let resolution = resolution_for_distance(distance, settings);
+                if last_resolution != Some(resolution) {
+                    let _ = resolution_tx.send(resolution);
+                    last_resolution = Some(resolution);
+                }
+            }
+        });
+
+        Self {
+            distance_tx,
+            resolution_rx,
+            stop,
+            handle: Some(handle),
+            settings,
+        }
+    }
+
+    fn submit_distance(&self, distance: f32) {
+        let _ = self.distance_tx.send(distance);
+    }
+
+    fn poll_resolution(&self) -> Option<usize> {
+        let mut latest = None;
+        while let Ok(resolution) = self.resolution_rx.try_recv() {
+            latest = Some(resolution);
+        }
+        latest
+    }
+
+    fn set_settings(&self, settings: LodSettings) {
+        if let Ok(mut guard) = self.settings.lock() {
+            *guard = settings;
+        }
+    }
+}
+
+impl Drop for LodDistanceWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Default for OffscreenRendererPreference {
@@ -146,6 +246,7 @@ pub struct OffscreenRenderer {
     sphere_mesh: RenderMesh,
     cylinder_mesh: RenderMesh,
     geometry_cache_key: Option<GeometryCacheKey>,
+    lod_worker: LodDistanceWorker,
 }
 
 impl OffscreenRenderer {
@@ -173,7 +274,8 @@ impl OffscreenRenderer {
         let mesh_resolution = mesh_resolution.max(3);
         let sphere_lat = mesh_resolution;
         let sphere_lon = mesh_resolution * 2;
-        let cylinder_sides = mesh_resolution * 2;
+        let cylinder_sides = DEFAULT_BOND_CYLINDER_SIDES;
+        let lod_settings = Arc::new(Mutex::new(preference.lod_settings()));
 
         Self {
             width: 0,
@@ -184,8 +286,9 @@ impl OffscreenRenderer {
             texture_id: None,
             gpu: None,
             sphere_mesh: RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon),
-            cylinder_mesh: RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides),
+            cylinder_mesh: RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides),
             geometry_cache_key: None,
+            lod_worker: LodDistanceWorker::new(lod_settings),
         }
     }
 
@@ -198,9 +301,9 @@ impl OffscreenRenderer {
         self.preference.set_mesh_resolution(mesh_resolution);
         let sphere_lat = mesh_resolution;
         let sphere_lon = mesh_resolution * 2;
-        let cylinder_sides = mesh_resolution * 2;
+        let cylinder_sides = DEFAULT_BOND_CYLINDER_SIDES;
         self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
-        self.cylinder_mesh = RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides);
+        self.cylinder_mesh = RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides);
         self.geometry_cache_key = None;
     }
 
@@ -218,7 +321,7 @@ impl OffscreenRenderer {
         }
 
         self.preference.set_lod_settings(lod_settings);
-        self.apply_lod_resolution(None);
+        self.lod_worker.set_settings(lod_settings);
         self.geometry_cache_key = None;
     }
 
@@ -249,9 +352,9 @@ impl OffscreenRenderer {
             let mesh_resolution = self.preference.mesh_resolution();
             let sphere_lat = mesh_resolution;
             let sphere_lon = mesh_resolution * 2;
-            let cylinder_sides = mesh_resolution * 2;
+            let cylinder_sides = DEFAULT_BOND_CYLINDER_SIDES;
             self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
-            self.cylinder_mesh = RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides);
+            self.cylinder_mesh = RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides);
         }
 
         self.geometry_cache_key = None;
@@ -293,7 +396,7 @@ impl OffscreenRenderer {
         view_proj: [f32; 16],
         color_fn: ColorFn,
     ) -> Result<(), String> {
-        self.apply_lod_resolution(molecule);
+        self.apply_pending_lod_resolution();
 
         let color_texture = self
             .color_texture
@@ -404,22 +507,13 @@ impl OffscreenRenderer {
         Ok(())
     }
 
-    fn apply_lod_resolution(&mut self, molecule: Option<&Molecule>) {
-        let lod_settings = self.preference.lod_settings();
-        if !lod_settings.enabled {
+    pub fn submit_lod_distance(&self, distance: f32) {
+        self.lod_worker.submit_distance(distance);
+    }
+
+    fn apply_pending_lod_resolution(&mut self) {
+        let Some(target_resolution) = self.lod_worker.poll_resolution() else {
             return;
-        }
-
-        let complexity = molecule
-            .map(|mol| mol.atoms.len().saturating_add(mol.bonds.len()))
-            .unwrap_or(0);
-
-        let target_resolution = if complexity <= lod_settings.high_detail_max_complexity {
-            lod_settings.high_detail_mesh_resolution
-        } else if complexity <= lod_settings.medium_detail_max_complexity {
-            lod_settings.medium_detail_mesh_resolution
-        } else {
-            lod_settings.low_detail_mesh_resolution
         };
 
         self.set_mesh_resolution(target_resolution.max(3));
@@ -542,7 +636,7 @@ impl OffscreenRenderer {
         } else {
             Some((
                 RenderMesh::new_sphere_uv(1.0, quality_resolution, quality_resolution * 2),
-                RenderMesh::new_cylinder(1.0, 1.0, quality_resolution * 2),
+                RenderMesh::new_cylinder_open_ended(1.0, 1.0, DEFAULT_BOND_CYLINDER_SIDES),
             ))
         };
         let (sphere_mesh, cylinder_mesh): (&RenderMesh, &RenderMesh) =
@@ -742,7 +836,7 @@ impl OffscreenRenderer {
         let bond_vertices = if matches!(quality, BallstickQuality::Low) {
             molecule.bonds.len().saturating_mul(2)
         } else {
-            let cylinder_vertices = (resolution.saturating_mul(2)).saturating_mul(12);
+            let cylinder_vertices = DEFAULT_BOND_CYLINDER_SIDES.saturating_mul(6);
             let bond_instances = molecule
                 .bonds
                 .iter()
@@ -1178,10 +1272,7 @@ fn append_mesh_triangles(
         if scale.z.abs() > 1e-6 { 1.0 / scale.z } else { 0.0 },
     );
 
-    for tri in mesh.indices.chunks(3) {
-        if tri.len() < 3 {
-            continue;
-        }
+    for tri in mesh.indices.chunks_exact(3) {
 
         if out.len().saturating_add(3) > max_vertices {
             return false;
@@ -1189,7 +1280,7 @@ fn append_mesh_triangles(
 
         for &idx in tri {
             let Some(src) = mesh.vertices.get(idx) else {
-                continue;
+                return false;
             };
 
             let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
@@ -1274,10 +1365,10 @@ impl RenderMesh {
         Self { vertices, indices }
     }
 
-    fn new_cylinder(len: f32, radius: f32, sides: usize) -> Self {
+    fn new_cylinder_open_ended(len: f32, radius: f32, sides: usize) -> Self {
         // Pre-calculate capacities
-        let vertex_capacity = sides * 2 + 2; // Side vertices + 2 center vertices
-        let index_capacity = sides * 12; // Side quads (2 triangles each) + caps (2 triangles each)
+        let vertex_capacity = sides * 2; // Side vertices only
+        let index_capacity = sides * 6; // Side quads (2 triangles each)
         
         let mut vertices = Vec::with_capacity(vertex_capacity);
         let mut indices = Vec::with_capacity(index_capacity);
@@ -1315,32 +1406,6 @@ impl RenderMesh {
             indices.push(bot1);
         }
 
-        let top_center = vertices.len();
-        vertices.push(RenderVertex {
-            position: [0.0, half, 0.0],
-            normal: [0.0, 1.0, 0.0],
-        });
-        let bottom_center = vertices.len();
-        vertices.push(RenderVertex {
-            position: [0.0, -half, 0.0],
-            normal: [0.0, -1.0, 0.0],
-        });
-
-        for i in 0..sides {
-            let next = (i + 1) % sides;
-            let top0 = i * 2;
-            let top1 = next * 2;
-            let bot0 = top0 + 1;
-            let bot1 = top1 + 1;
-
-            indices.push(top_center);
-            indices.push(top1);
-            indices.push(top0);
-            indices.push(bottom_center);
-            indices.push(bot0);
-            indices.push(bot1);
-        }
-
         Self { vertices, indices }
     }
 }
@@ -1363,4 +1428,14 @@ fn append_line(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, color: [f32; 3], max_ver
     });
 
     true
+}
+
+fn resolution_for_distance(distance: f32, lod_settings: LodSettings) -> usize {
+    if distance <= lod_settings.high_detail_max_distance {
+        lod_settings.high_detail_mesh_resolution
+    } else if distance <= lod_settings.medium_detail_max_distance {
+        lod_settings.medium_detail_mesh_resolution
+    } else {
+        lod_settings.low_detail_mesh_resolution
+    }
 }

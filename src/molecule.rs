@@ -109,6 +109,18 @@ pub struct Molecule {
 }
 
 impl Molecule {
+    pub fn center(&self) -> Vec3 {
+        if self.atoms.is_empty() {
+            return Vec3::new_zero();
+        }
+
+        let sum = self
+            .atoms
+            .iter()
+            .fold(Vec3::new_zero(), |acc, atom| acc + atom.position);
+        sum / self.atoms.len() as f32
+    }
+
     pub fn from_mol2(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut atoms = Vec::new();

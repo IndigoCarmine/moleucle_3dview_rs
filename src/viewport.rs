@@ -76,6 +76,12 @@ impl InteractiveMoleculeViewport {
         let height = available.y.max(1.0) as u32;
         self.controller.camera.set_aspect(width as f32 / height as f32);
 
+        if let Some(molecule) = self.viewer.molecule.as_ref() {
+            let camera_position = self.controller.camera.position();
+            let distance = (camera_position - molecule.center()).magnitude();
+            self.offscreen.submit_lod_distance(distance);
+        }
+
         self.offscreen.ensure_resources(render_state, width, height)?;
 
         let selected = self.viewer.selected_atoms_ref();

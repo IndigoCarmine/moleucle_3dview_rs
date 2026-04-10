@@ -61,20 +61,24 @@ impl eframe::App for SimpleViewerApp {
             });
 
             ui.separator();
-            ui.label("LOD settings (external config)");
+            ui.label("LOD settings (distance-based, external config)");
 
             let mut lod = self.viewport.lod_settings();
             ui.checkbox(&mut lod.enabled, "Enable LOD auto optimization");
             ui.add(
-                egui::Slider::new(&mut lod.high_detail_max_complexity, 10..=5000)
-                    .text("High detail max complexity"),
+                egui::Slider::new(&mut lod.distance_check_fps, 1.0..=60.0)
+                    .text("Distance check FPS"),
             );
             ui.add(
-                egui::Slider::new(&mut lod.medium_detail_max_complexity, 10..=10000)
-                    .text("Medium detail max complexity"),
+                egui::Slider::new(&mut lod.high_detail_max_distance, 0.5..=50.0)
+                    .text("High detail max distance"),
             );
-            if lod.medium_detail_max_complexity < lod.high_detail_max_complexity {
-                lod.medium_detail_max_complexity = lod.high_detail_max_complexity;
+            ui.add(
+                egui::Slider::new(&mut lod.medium_detail_max_distance, 0.5..=100.0)
+                    .text("Medium detail max distance"),
+            );
+            if lod.medium_detail_max_distance < lod.high_detail_max_distance {
+                lod.medium_detail_max_distance = lod.high_detail_max_distance;
             }
             ui.add(
                 egui::Slider::new(&mut lod.high_detail_mesh_resolution, 3..=32)
