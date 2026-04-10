@@ -4,6 +4,7 @@ use crate::{
     CameraController,
     Molecule,
     MoleculeViewer,
+    offscreen_renderer::LodSettings,
     OffscreenRenderer,
     RenderStyle,
     SelectedAtomRender,
@@ -38,6 +39,22 @@ impl InteractiveMoleculeViewport {
 
     pub fn render_style(&self) -> RenderStyle {
         self.offscreen.render_style()
+    }
+
+    pub fn mesh_resolution(&self) -> usize {
+        self.offscreen.mesh_resolution()
+    }
+
+    pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
+        self.offscreen.set_mesh_resolution(mesh_resolution);
+    }
+
+    pub fn lod_settings(&self) -> LodSettings {
+        self.offscreen.lod_settings()
+    }
+
+    pub fn set_lod_settings(&mut self, lod_settings: LodSettings) {
+        self.offscreen.set_lod_settings(lod_settings);
     }
 
     pub fn set_render_style(&mut self, render_style: RenderStyle) {

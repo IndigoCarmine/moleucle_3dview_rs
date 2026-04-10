@@ -9,6 +9,31 @@ use std::hash::{Hash, Hasher};
 use wgpu::util::DeviceExt;
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
+const SAFE_MAX_VERTEX_BUFFER_BYTES: usize = 240 * 1024 * 1024;
+const MAX_RENDER_VERTICES: usize = SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<Vertex>();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LodSettings {
+    pub enabled: bool,
+    pub high_detail_max_complexity: usize,
+    pub medium_detail_max_complexity: usize,
+    pub high_detail_mesh_resolution: usize,
+    pub medium_detail_mesh_resolution: usize,
+    pub low_detail_mesh_resolution: usize,
+}
+
+impl Default for LodSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            high_detail_max_complexity: 150,
+            medium_detail_max_complexity: 600,
+            high_detail_mesh_resolution: 14,
+            medium_detail_mesh_resolution: 8,
+            low_detail_mesh_resolution: 4,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderStyle {
@@ -53,6 +78,7 @@ pub struct OffscreenRenderer {
     width: u32,
     height: u32,
     mesh_resolution: usize,
+    lod_settings: LodSettings,
     render_style: RenderStyle,
     color_texture: Option<wgpu::Texture>,
     depth_texture: Option<wgpu::Texture>,
@@ -65,10 +91,17 @@ pub struct OffscreenRenderer {
 
 impl OffscreenRenderer {
     pub fn new() -> Self {
-        Self::new_with_mesh_resolution(DEFAULT_MESH_RESOLUTION)
+        Self::new_with_mesh_resolution_and_lod(DEFAULT_MESH_RESOLUTION, LodSettings::default())
     }
 
     pub fn new_with_mesh_resolution(mesh_resolution: usize) -> Self {
+        Self::new_with_mesh_resolution_and_lod(mesh_resolution, LodSettings::default())
+    }
+
+    pub fn new_with_mesh_resolution_and_lod(
+        mesh_resolution: usize,
+        lod_settings: LodSettings,
+    ) -> Self {
         let mesh_resolution = mesh_resolution.max(3);
         let sphere_lat = mesh_resolution;
         let sphere_lon = mesh_resolution * 2;
@@ -78,6 +111,7 @@ impl OffscreenRenderer {
             width: 0,
             height: 0,
             mesh_resolution,
+            lod_settings,
             render_style: RenderStyle::BallStick,
             color_texture: None,
             depth_texture: None,
@@ -101,6 +135,24 @@ impl OffscreenRenderer {
         let cylinder_sides = mesh_resolution * 2;
         self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
         self.cylinder_mesh = RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides);
+        self.geometry_cache_key = None;
+    }
+
+    pub fn mesh_resolution(&self) -> usize {
+        self.mesh_resolution
+    }
+
+    pub fn lod_settings(&self) -> LodSettings {
+        self.lod_settings
+    }
+
+    pub fn set_lod_settings(&mut self, lod_settings: LodSettings) {
+        if self.lod_settings == lod_settings {
+            return;
+        }
+
+        self.lod_settings = lod_settings;
+        self.apply_lod_resolution(None);
         self.geometry_cache_key = None;
     }
 
@@ -151,6 +203,8 @@ impl OffscreenRenderer {
         view_proj: [f32; 16],
         color_fn: ColorFn,
     ) -> Result<(), String> {
+        self.apply_lod_resolution(molecule);
+
         let color_texture = self
             .color_texture
             .as_ref()
@@ -176,6 +230,17 @@ impl OffscreenRenderer {
             .ok_or_else(|| "Offscreen GPU resources are not initialized".to_string())?;
 
         if let Some(vertices) = rebuilt_vertices {
+            let primitive_stride = match self.render_style {
+                RenderStyle::BallStick => 3,
+                RenderStyle::Wireframe => 2,
+            };
+
+            let mut vertices = vertices;
+            if vertices.len() > MAX_RENDER_VERTICES {
+                let capped = MAX_RENDER_VERTICES - (MAX_RENDER_VERTICES % primitive_stride);
+                vertices.truncate(capped);
+            }
+
             if vertices.is_empty() {
                 gpu.vertex_buffer = None;
                 gpu.vertex_count = 0;
@@ -247,6 +312,26 @@ impl OffscreenRenderer {
 
         render_state.queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+
+    fn apply_lod_resolution(&mut self, molecule: Option<&Molecule>) {
+        if !self.lod_settings.enabled {
+            return;
+        }
+
+        let complexity = molecule
+            .map(|mol| mol.atoms.len().saturating_add(mol.bonds.len()))
+            .unwrap_or(0);
+
+        let target_resolution = if complexity <= self.lod_settings.high_detail_max_complexity {
+            self.lod_settings.high_detail_mesh_resolution
+        } else if complexity <= self.lod_settings.medium_detail_max_complexity {
+            self.lod_settings.medium_detail_mesh_resolution
+        } else {
+            self.lod_settings.low_detail_mesh_resolution
+        };
+
+        self.set_mesh_resolution(target_resolution.max(3));
     }
 
     pub fn free_egui_texture(&mut self, render_state: &egui_wgpu::RenderState) {
@@ -351,18 +436,25 @@ impl OffscreenRenderer {
         selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
+        let max_vertices = MAX_RENDER_VERTICES;
         let mut vertices = if let Some(mol) = molecule {
             // Estimate capacity: bonds * ~50 vertices + atoms * ~200 vertices + axes * ~75 vertices
-            let capacity = mol.bonds.len() * 50 + mol.atoms.len() * 200 + 225;
+            let capacity = mol
+                .bonds
+                .len()
+                .saturating_mul(50)
+                .saturating_add(mol.atoms.len().saturating_mul(200))
+                .saturating_add(225)
+                .min(max_vertices);
             Vec::with_capacity(capacity)
         } else {
-            Vec::with_capacity(225) // Just axes
+            Vec::with_capacity(225.min(max_vertices)) // Just axes
         };
 
         if let Some(mol) = molecule {
             let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
 
-            for bond in &mol.bonds {
+            'bonds: for bond in &mol.bonds {
                 let a = mol.atoms[bond.atom_a].position;
                 let b = mol.atoms[bond.atom_b].position;
                 let diff = b - a;
@@ -386,61 +478,70 @@ impl OffscreenRenderer {
 
                 let base_radius = if bond_order <= 1 { 0.15 } else { 0.10 };
                 for offset in line_offsets {
-                    append_mesh_triangles(
+                    if !append_mesh_triangles(
                         &mut vertices,
                         &self.cylinder_mesh,
                         mid + lateral * offset,
                         orientation,
                         Vec3::new(base_radius, len, base_radius),
                         [0.55, 0.55, 0.55],
-                    );
+                        max_vertices,
+                    ) {
+                        break 'bonds;
+                    }
                 }
             }
 
-            for (idx, atom) in mol.atoms.iter().enumerate() {
+            'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
                 let radius = if selected_this { 0.56 } else { 0.40 };
                 let color_tuple = color_fn(atom, selected_this);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
-                append_mesh_triangles(
+                if !append_mesh_triangles(
                     &mut vertices,
                     &self.sphere_mesh,
                     pos,
                     Quaternion::new_identity(),
                     Vec3::new(radius, radius, radius),
                     color,
-                );
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
             }
         }
 
         // xyz axes as cylinders
         let axis_len = 2.0;
         let axis_radius = 0.05;
-        append_mesh_triangles(
+        let _ = append_mesh_triangles(
             &mut vertices,
             &self.cylinder_mesh,
             Vec3::new(axis_len * 0.5, 0.0, 0.0),
             Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
             Vec3::new(axis_radius, axis_len, axis_radius),
             [1.0, 0.0, 0.0],
+            max_vertices,
         );
-        append_mesh_triangles(
+        let _ = append_mesh_triangles(
             &mut vertices,
             &self.cylinder_mesh,
             Vec3::new(0.0, axis_len * 0.5, 0.0),
             Quaternion::new_identity(),
             Vec3::new(axis_radius, axis_len, axis_radius),
             [0.0, 1.0, 0.0],
+            max_vertices,
         );
-        append_mesh_triangles(
+        let _ = append_mesh_triangles(
             &mut vertices,
             &self.cylinder_mesh,
             Vec3::new(0.0, 0.0, axis_len * 0.5),
             Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
             Vec3::new(axis_radius, axis_len, axis_radius),
             [0.0, 0.0, 1.0],
+            max_vertices,
         );
 
         vertices
@@ -452,19 +553,26 @@ impl OffscreenRenderer {
         selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
+        let max_vertices = MAX_RENDER_VERTICES;
         let mut vertices = if let Some(mol) = molecule {
             // Estimate capacity: bonds * ~4 + atoms * ~6 + axes * ~6
             // This is much less than ballstick since we're only adding lines
-            let capacity = mol.bonds.len() * 4 + mol.atoms.len() * 6 + 6;
+            let capacity = mol
+                .bonds
+                .len()
+                .saturating_mul(4)
+                .saturating_add(mol.atoms.len().saturating_mul(6))
+                .saturating_add(6)
+                .min(max_vertices);
             Vec::with_capacity(capacity)
         } else {
-            Vec::with_capacity(6) // Just axes
+            Vec::with_capacity(6.min(max_vertices)) // Just axes
         };
 
         if let Some(mol) = molecule {
             let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
 
-            for bond in &mol.bonds {
+            'bonds: for bond in &mol.bonds {
                 let a = mol.atoms[bond.atom_a].position;
                 let b = mol.atoms[bond.atom_b].position;
                 let diff = b - a;
@@ -483,56 +591,70 @@ impl OffscreenRenderer {
                 let bond_order = bond.order.max(1) as usize;
                 for offset in bond_line_offsets(bond_order) {
                     let off = lateral * offset;
-                    append_line(&mut vertices, a + off, b + off, [0.70, 0.70, 0.72]);
+                    if !append_line(&mut vertices, a + off, b + off, [0.70, 0.70, 0.72], max_vertices) {
+                        break 'bonds;
+                    }
                 }
             }
 
-            for (idx, atom) in mol.atoms.iter().enumerate() {
+            'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
                 let span = if selected_this { 0.22 } else { 0.14 };
                 let color_tuple = color_fn(atom, selected_this);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
-                append_line(
+                if !append_line(
                     &mut vertices,
                     pos + Vec3::new(-span, 0.0, 0.0),
                     pos + Vec3::new(span, 0.0, 0.0),
                     color,
-                );
-                append_line(
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
+                if !append_line(
                     &mut vertices,
                     pos + Vec3::new(0.0, -span, 0.0),
                     pos + Vec3::new(0.0, span, 0.0),
                     color,
-                );
-                append_line(
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
+                if !append_line(
                     &mut vertices,
                     pos + Vec3::new(0.0, 0.0, -span),
                     pos + Vec3::new(0.0, 0.0, span),
                     color,
-                );
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
             }
         }
 
         let axis_len = 2.0;
-        append_line(
+        let _ = append_line(
             &mut vertices,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(axis_len, 0.0, 0.0),
             [1.0, 0.0, 0.0],
+            max_vertices,
         );
-        append_line(
+        let _ = append_line(
             &mut vertices,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.0, axis_len, 0.0),
             [0.0, 1.0, 0.0],
+            max_vertices,
         );
-        append_line(
+        let _ = append_line(
             &mut vertices,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.0, 0.0, axis_len),
             [0.0, 0.0, 1.0],
+            max_vertices,
         );
 
         vertices
@@ -813,7 +935,8 @@ fn append_mesh_triangles(
     orientation: Quaternion,
     scale: Vec3,
     color: [f32; 3],
-) {
+    max_vertices: usize,
+) -> bool {
     let inv_scale = Vec3::new(
         if scale.x.abs() > 1e-6 { 1.0 / scale.x } else { 0.0 },
         if scale.y.abs() > 1e-6 { 1.0 / scale.y } else { 0.0 },
@@ -823,6 +946,10 @@ fn append_mesh_triangles(
     for tri in mesh.indices.chunks(3) {
         if tri.len() < 3 {
             continue;
+        }
+
+        if out.len().saturating_add(3) > max_vertices {
+            return false;
         }
 
         for &idx in tri {
@@ -845,6 +972,8 @@ fn append_mesh_triangles(
             });
         }
     }
+
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -981,7 +1110,11 @@ impl RenderMesh {
     }
 }
 
-fn append_line(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, color: [f32; 3]) {
+fn append_line(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, color: [f32; 3], max_vertices: usize) -> bool {
+    if out.len().saturating_add(2) > max_vertices {
+        return false;
+    }
+
     let normal = [0.0, 1.0, 0.0];
     out.push(Vertex {
         position: [a.x, a.y, a.z],
@@ -993,4 +1126,6 @@ fn append_line(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, color: [f32; 3]) {
         normal,
         color,
     });
+
+    true
 }

@@ -33,15 +33,15 @@ impl SimpleViewerApp {
 }
 
 fn load_default_molecule() -> Result<Molecule, String> {
-    let path = Path::new("A.pdb");
+    let path = Path::new("Benzene.mol2");
     if !path.exists() {
         return Err(format!(
-            "A.pdb not found at {:?}",
+            "Benzene.mol2 not found at {:?}",
             std::env::current_dir().map_err(|err| err.to_string())?
         ));
     }
 
-    Molecule::from_pdb(path).map_err(|err| format!("Failed to parse A.pdb: {err}"))
+    Molecule::from_mol2(path).map_err(|err| format!("Failed to parse Benzene.mol2: {err}"))
 }
 
 impl eframe::App for SimpleViewerApp {
@@ -59,6 +59,47 @@ impl eframe::App for SimpleViewerApp {
                 ui.selectable_value(&mut style, RenderStyle::Wireframe, "Wireframe");
                 self.viewport.set_render_style(style);
             });
+
+            ui.separator();
+            ui.label("LOD settings (external config)");
+
+            let mut lod = self.viewport.lod_settings();
+            ui.checkbox(&mut lod.enabled, "Enable LOD auto optimization");
+            ui.add(
+                egui::Slider::new(&mut lod.high_detail_max_complexity, 10..=5000)
+                    .text("High detail max complexity"),
+            );
+            ui.add(
+                egui::Slider::new(&mut lod.medium_detail_max_complexity, 10..=10000)
+                    .text("Medium detail max complexity"),
+            );
+            if lod.medium_detail_max_complexity < lod.high_detail_max_complexity {
+                lod.medium_detail_max_complexity = lod.high_detail_max_complexity;
+            }
+            ui.add(
+                egui::Slider::new(&mut lod.high_detail_mesh_resolution, 3..=32)
+                    .text("High detail resolution"),
+            );
+            ui.add(
+                egui::Slider::new(&mut lod.medium_detail_mesh_resolution, 3..=24)
+                    .text("Medium detail resolution"),
+            );
+            ui.add(
+                egui::Slider::new(&mut lod.low_detail_mesh_resolution, 3..=16)
+                    .text("Low detail resolution"),
+            );
+            self.viewport.set_lod_settings(lod);
+
+            if !lod.enabled {
+                let mut resolution = self.viewport.mesh_resolution();
+                ui.add(egui::Slider::new(&mut resolution, 3..=32).text("Manual mesh resolution"));
+                self.viewport.set_mesh_resolution(resolution);
+            } else {
+                ui.label(format!(
+                    "Auto mesh resolution: {}",
+                    self.viewport.mesh_resolution()
+                ));
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
