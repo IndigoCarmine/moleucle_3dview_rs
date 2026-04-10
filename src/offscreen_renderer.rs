@@ -1,3 +1,4 @@
+use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::viewer::ColorFn;
 use crate::Molecule;
 use egui::TextureId;
@@ -32,6 +33,59 @@ impl Default for LodSettings {
             medium_detail_mesh_resolution: 8,
             low_detail_mesh_resolution: 4,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffscreenRendererPreference {
+    mesh_resolution: usize,
+    lod_settings: LodSettings,
+    render_style: RenderStyle,
+}
+
+impl Default for OffscreenRendererPreference {
+    fn default() -> Self {
+        Self {
+            mesh_resolution: DEFAULT_MESH_RESOLUTION,
+            lod_settings: LodSettings::default(),
+            render_style: RenderStyle::BallStick,
+        }
+    }
+}
+
+impl OffscreenRendererPreference {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_mesh_resolution(mesh_resolution: usize) -> Self {
+        let mut preference = Self::default();
+        preference.set_mesh_resolution(mesh_resolution);
+        preference
+    }
+
+    pub fn mesh_resolution(&self) -> usize {
+        self.mesh_resolution
+    }
+
+    pub fn lod_settings(&self) -> LodSettings {
+        self.lod_settings
+    }
+
+    pub fn render_style(&self) -> RenderStyle {
+        self.render_style
+    }
+
+    pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
+        self.mesh_resolution = mesh_resolution.max(3);
+    }
+
+    pub fn set_lod_settings(&mut self, lod_settings: LodSettings) {
+        self.lod_settings = lod_settings;
+    }
+
+    pub fn set_render_style(&mut self, render_style: RenderStyle) {
+        self.render_style = render_style;
     }
 }
 
@@ -84,9 +138,7 @@ struct GeometryCacheKey {
 pub struct OffscreenRenderer {
     width: u32,
     height: u32,
-    mesh_resolution: usize,
-    lod_settings: LodSettings,
-    render_style: RenderStyle,
+    preference: OffscreenRendererPreference,
     color_texture: Option<wgpu::Texture>,
     depth_texture: Option<wgpu::Texture>,
     texture_id: Option<TextureId>,
@@ -98,17 +150,26 @@ pub struct OffscreenRenderer {
 
 impl OffscreenRenderer {
     pub fn new() -> Self {
-        Self::new_with_mesh_resolution_and_lod(DEFAULT_MESH_RESOLUTION, LodSettings::default())
+        Self::new_with_preference(OffscreenRendererPreference::default())
     }
 
     pub fn new_with_mesh_resolution(mesh_resolution: usize) -> Self {
-        Self::new_with_mesh_resolution_and_lod(mesh_resolution, LodSettings::default())
+        Self::new_with_preference(OffscreenRendererPreference::with_mesh_resolution(
+            mesh_resolution,
+        ))
     }
 
     pub fn new_with_mesh_resolution_and_lod(
         mesh_resolution: usize,
         lod_settings: LodSettings,
     ) -> Self {
+        let mut preference = OffscreenRendererPreference::with_mesh_resolution(mesh_resolution);
+        preference.set_lod_settings(lod_settings);
+        Self::new_with_preference(preference)
+    }
+
+    pub fn new_with_preference(preference: OffscreenRendererPreference) -> Self {
+        let mesh_resolution = preference.mesh_resolution();
         let mesh_resolution = mesh_resolution.max(3);
         let sphere_lat = mesh_resolution;
         let sphere_lon = mesh_resolution * 2;
@@ -117,9 +178,7 @@ impl OffscreenRenderer {
         Self {
             width: 0,
             height: 0,
-            mesh_resolution,
-            lod_settings,
-            render_style: RenderStyle::BallStick,
+            preference,
             color_texture: None,
             depth_texture: None,
             texture_id: None,
@@ -132,11 +191,11 @@ impl OffscreenRenderer {
 
     pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
         let mesh_resolution = mesh_resolution.max(3);
-        if self.mesh_resolution == mesh_resolution {
+        if self.preference.mesh_resolution() == mesh_resolution {
             return;
         }
 
-        self.mesh_resolution = mesh_resolution;
+        self.preference.set_mesh_resolution(mesh_resolution);
         let sphere_lat = mesh_resolution;
         let sphere_lon = mesh_resolution * 2;
         let cylinder_sides = mesh_resolution * 2;
@@ -146,32 +205,56 @@ impl OffscreenRenderer {
     }
 
     pub fn mesh_resolution(&self) -> usize {
-        self.mesh_resolution
+        self.preference.mesh_resolution()
     }
 
     pub fn lod_settings(&self) -> LodSettings {
-        self.lod_settings
+        self.preference.lod_settings()
     }
 
     pub fn set_lod_settings(&mut self, lod_settings: LodSettings) {
-        if self.lod_settings == lod_settings {
+        if self.preference.lod_settings() == lod_settings {
             return;
         }
 
-        self.lod_settings = lod_settings;
+        self.preference.set_lod_settings(lod_settings);
         self.apply_lod_resolution(None);
         self.geometry_cache_key = None;
     }
 
     pub fn render_style(&self) -> RenderStyle {
-        self.render_style
+        self.preference.render_style()
     }
 
     pub fn set_render_style(&mut self, render_style: RenderStyle) {
-        if self.render_style != render_style {
-            self.render_style = render_style;
+        if self.preference.render_style() != render_style {
+            self.preference.set_render_style(render_style);
             self.geometry_cache_key = None;
         }
+    }
+
+    pub fn preference(&self) -> OffscreenRendererPreference {
+        self.preference
+    }
+
+    pub fn set_preference(&mut self, preference: OffscreenRendererPreference) {
+        if self.preference == preference {
+            return;
+        }
+
+        let mesh_resolution_changed = self.preference.mesh_resolution() != preference.mesh_resolution();
+        self.preference = preference;
+
+        if mesh_resolution_changed {
+            let mesh_resolution = self.preference.mesh_resolution();
+            let sphere_lat = mesh_resolution;
+            let sphere_lon = mesh_resolution * 2;
+            let cylinder_sides = mesh_resolution * 2;
+            self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
+            self.cylinder_mesh = RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides);
+        }
+
+        self.geometry_cache_key = None;
     }
 
     pub fn texture_id(&self) -> Option<TextureId> {
@@ -237,7 +320,7 @@ impl OffscreenRenderer {
             .ok_or_else(|| "Offscreen GPU resources are not initialized".to_string())?;
 
         if let Some(vertices) = rebuilt_vertices {
-            let primitive_stride = match self.render_style {
+            let primitive_stride = match self.preference.render_style() {
                 RenderStyle::BallStick => 3,
                 RenderStyle::Wireframe => 2,
             };
@@ -305,7 +388,7 @@ impl OffscreenRenderer {
                 occlusion_query_set: None,
             });
 
-            let pipeline = match self.render_style {
+            let pipeline = match self.preference.render_style() {
                 RenderStyle::BallStick => &gpu.pipeline,
                 RenderStyle::Wireframe => &gpu.wire_pipeline,
             };
@@ -322,7 +405,8 @@ impl OffscreenRenderer {
     }
 
     fn apply_lod_resolution(&mut self, molecule: Option<&Molecule>) {
-        if !self.lod_settings.enabled {
+        let lod_settings = self.preference.lod_settings();
+        if !lod_settings.enabled {
             return;
         }
 
@@ -330,12 +414,12 @@ impl OffscreenRenderer {
             .map(|mol| mol.atoms.len().saturating_add(mol.bonds.len()))
             .unwrap_or(0);
 
-        let target_resolution = if complexity <= self.lod_settings.high_detail_max_complexity {
-            self.lod_settings.high_detail_mesh_resolution
-        } else if complexity <= self.lod_settings.medium_detail_max_complexity {
-            self.lod_settings.medium_detail_mesh_resolution
+        let target_resolution = if complexity <= lod_settings.high_detail_max_complexity {
+            lod_settings.high_detail_mesh_resolution
+        } else if complexity <= lod_settings.medium_detail_max_complexity {
+            lod_settings.medium_detail_mesh_resolution
         } else {
-            self.lod_settings.low_detail_mesh_resolution
+            lod_settings.low_detail_mesh_resolution
         };
 
         self.set_mesh_resolution(target_resolution.max(3));
@@ -419,9 +503,9 @@ impl OffscreenRenderer {
                 .unwrap_or(0),
             selected_len: selected_atoms.len(),
             selected_hash: hasher.finish(),
-            render_style: self.render_style,
+            render_style: self.preference.render_style(),
             color_fn_ptr: color_fn as usize,
-            mesh_resolution: self.mesh_resolution,
+            mesh_resolution: self.preference.mesh_resolution(),
         }
     }
 
@@ -431,7 +515,7 @@ impl OffscreenRenderer {
         selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
-        match self.render_style {
+        match self.preference.render_style() {
             RenderStyle::BallStick => self.build_ballstick_vertices(molecule, selected_atoms, color_fn),
             RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, selected_atoms, color_fn),
         }
@@ -444,14 +528,16 @@ impl OffscreenRenderer {
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
         let quality = self.pick_ballstick_quality(molecule);
+        let mesh_resolution = self.preference.mesh_resolution();
         let quality_resolution = match quality {
-            BallstickQuality::High => self.mesh_resolution.max(3),
-            BallstickQuality::Medium => (self.mesh_resolution / 2).max(3),
+            BallstickQuality::High => mesh_resolution.max(3),
+            BallstickQuality::Medium => (mesh_resolution / 2).max(3),
             BallstickQuality::Low => 3,
         };
         let low_mode = matches!(quality, BallstickQuality::Low);
 
-        let generated_meshes = if quality_resolution == self.mesh_resolution {
+        let mesh_resolution = self.preference.mesh_resolution();
+        let generated_meshes = if quality_resolution == mesh_resolution {
             None
         } else {
             Some((
@@ -506,7 +592,11 @@ impl OffscreenRenderer {
                 }
                 lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
 
-                let base_radius = if bond_order <= 1 { 0.15 } else { 0.10 };
+                let base_radius = if bond_order <= 1 {
+                    default_ball_stick_bond_radius()
+                } else {
+                    default_ball_stick_bond_radius() * 0.67
+                };
                 for offset in line_offsets {
                     if low_mode {
                         if !append_line(
@@ -535,29 +625,12 @@ impl OffscreenRenderer {
             'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
-                let radius = match quality {
-                    BallstickQuality::High => {
-                        if selected_this {
-                            0.56
-                        } else {
-                            0.40
-                        }
-                    }
-                    BallstickQuality::Medium => {
-                        if selected_this {
-                            0.48
-                        } else {
-                            0.34
-                        }
-                    }
-                    BallstickQuality::Low => {
-                        if selected_this {
-                            0.40
-                        } else {
-                            0.28
-                        }
-                    }
+                let quality_scale = match quality {
+                    BallstickQuality::High => 1.0,
+                    BallstickQuality::Medium => 0.85,
+                    BallstickQuality::Low => 0.70,
                 };
+                let radius = ball_stick_radius(&atom.element, selected_this) * quality_scale;
                 let color_tuple = color_fn(atom, selected_this);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
@@ -653,8 +726,8 @@ impl OffscreenRenderer {
 
     fn estimate_ballstick_vertices(&self, molecule: &Molecule, quality: BallstickQuality) -> usize {
         let resolution = match quality {
-            BallstickQuality::High => self.mesh_resolution.max(3),
-            BallstickQuality::Medium => (self.mesh_resolution / 2).max(3),
+            BallstickQuality::High => self.preference.mesh_resolution().max(3),
+            BallstickQuality::Medium => (self.preference.mesh_resolution() / 2).max(3),
             BallstickQuality::Low => 3,
         };
 

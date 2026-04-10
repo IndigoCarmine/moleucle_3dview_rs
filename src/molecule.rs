@@ -1,3 +1,4 @@
+use crate::atom_radii::vdw_radius;
 use lin_alg::f32::Vec3;
 use std::path::Path;
 
@@ -311,7 +312,7 @@ impl Molecule {
 
         for i in 0..atoms.len() {
             let pos_i = atoms[i].position;
-            let radius_i = get_vdw_radius(&atoms[i].element);
+            let radius_i = vdw_radius(&atoms[i].element);
 
             for j in (i + 1)..atoms.len() {
                 let pos_j = atoms[j].position;
@@ -323,7 +324,7 @@ impl Molecule {
                     continue;
                 }
 
-                let expected_dist = radius_i + get_vdw_radius(&atoms[j].element);
+                let expected_dist = radius_i + vdw_radius(&atoms[j].element);
                 let max_dist_sq = expected_dist * expected_dist * BOND_DISTANCE_FACTOR_SQ;
 
                 if dist_sq < max_dist_sq {
@@ -355,19 +356,3 @@ fn extract_element_symbol(element: &str, atom_name: &str) -> String {
     }
 }
 
-/// Get approximate van der Waals radius for element
-fn get_vdw_radius(element: &str) -> f32 {
-    match element.to_uppercase().as_str() {
-        "H" => 1.20,
-        "C" => 1.70,
-        "N" => 1.55,
-        "O" => 1.52,
-        "F" => 1.47,
-        "P" => 1.80,
-        "S" => 1.80,
-        "Cl" => 1.75,
-        "Br" => 1.85,
-        "I" => 1.98,
-        _ => 1.70, // Default
-    }
-}

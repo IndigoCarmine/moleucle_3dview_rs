@@ -1,3 +1,4 @@
+use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::molecule::{Atom, Molecule};
 use crate::scene_types::{Entity, Mesh, Scene};
 use crate::{AdditionalRender, SelectedAtomRender};
@@ -72,7 +73,7 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
         if let Some(mol) = &self.molecule {
             // Check Atoms
             for (i, atom) in mol.atoms.iter().enumerate() {
-                let radius = 0.4; // Must match update_scene
+                let radius = ball_stick_radius(&atom.element, false);
                 if let Some(t) = Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius) {
                     if t < closest_t && t > 0.0 {
                         closest_t = t;
@@ -85,7 +86,7 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             for (i, bond) in mol.bonds.iter().enumerate() {
                 let p1 = mol.atoms[bond.atom_a].position;
                 let p2 = mol.atoms[bond.atom_b].position;
-                let radius = 0.15; // Must match update_scene
+                let radius = default_ball_stick_bond_radius(); // Must match update_scene
 
                 if let Some(t) = Self::ray_cylinder_intersect(ray_origin, ray_dir, p1, p2, radius) {
                     if t < closest_t && t > 0.0 {
@@ -184,7 +185,7 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
                 // Use custom color function
                 let color = (self.color_fn)(atom, false);
 
-                let radius = 0.4; // Base radius
+                let radius = ball_stick_radius(&atom.element, false);
 
                 scene.entities.push(Entity::new(
                     sphere_idx,
@@ -227,7 +228,7 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
 
                 let orientation = Quaternion::from_unit_vecs(up, dir);
 
-                let bond_radius = 0.15;
+                let bond_radius = default_ball_stick_bond_radius();
                 let scale_partial = Vec3::new(bond_radius, len, bond_radius);
 
                 let mut entity = Entity::new(

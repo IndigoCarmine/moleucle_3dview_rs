@@ -27,6 +27,7 @@
 //! ```
 
 pub mod additional_render;
+pub mod atom_radii;
 pub mod camera;
 pub mod controller;
 pub mod molecule;
@@ -36,6 +37,7 @@ pub mod viewer;
 pub mod viewport;
 
 pub use additional_render::{AdditionalRender, SelectedAtomRender, DebugRender};
+pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
 pub use camera::{Camera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
 pub use molecule::{Molecule, Atom, AtomRecord};
