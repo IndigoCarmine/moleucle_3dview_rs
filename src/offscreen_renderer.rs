@@ -3,7 +3,9 @@ use crate::Molecule;
 use egui::TextureId;
 use egui_wgpu::wgpu;
 use lin_alg::f32::{Quaternion, Vec3};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use wgpu::util::DeviceExt;
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
@@ -37,6 +39,16 @@ struct GpuResources {
     vertex_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeometryCacheKey {
+    molecule_ptr: usize,
+    selected_len: usize,
+    selected_hash: u64,
+    render_style: RenderStyle,
+    color_fn_ptr: usize,
+    mesh_resolution: usize,
+}
+
 pub struct OffscreenRenderer {
     width: u32,
     height: u32,
@@ -48,6 +60,7 @@ pub struct OffscreenRenderer {
     gpu: Option<GpuResources>,
     sphere_mesh: RenderMesh,
     cylinder_mesh: RenderMesh,
+    geometry_cache_key: Option<GeometryCacheKey>,
 }
 
 impl OffscreenRenderer {
@@ -72,6 +85,7 @@ impl OffscreenRenderer {
             gpu: None,
             sphere_mesh: RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon),
             cylinder_mesh: RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides),
+            geometry_cache_key: None,
         }
     }
 
@@ -87,6 +101,7 @@ impl OffscreenRenderer {
         let cylinder_sides = mesh_resolution * 2;
         self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
         self.cylinder_mesh = RenderMesh::new_cylinder(1.0, 1.0, cylinder_sides);
+        self.geometry_cache_key = None;
     }
 
     pub fn render_style(&self) -> RenderStyle {
@@ -94,7 +109,10 @@ impl OffscreenRenderer {
     }
 
     pub fn set_render_style(&mut self, render_style: RenderStyle) {
-        self.render_style = render_style;
+        if self.render_style != render_style {
+            self.render_style = render_style;
+            self.geometry_cache_key = None;
+        }
     }
 
     pub fn texture_id(&self) -> Option<TextureId> {
@@ -145,31 +163,39 @@ impl OffscreenRenderer {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let vertices = self.build_scene_vertices(molecule, selected_atoms, color_fn);
+        let cache_key = self.build_geometry_cache_key(molecule, selected_atoms, color_fn);
+        let rebuilt_vertices = if self.geometry_cache_key != Some(cache_key) {
+            Some(self.build_scene_vertices(molecule, selected_atoms, color_fn))
+        } else {
+            None
+        };
 
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| "Offscreen GPU resources are not initialized".to_string())?;
 
+        if let Some(vertices) = rebuilt_vertices {
+            if vertices.is_empty() {
+                gpu.vertex_buffer = None;
+                gpu.vertex_count = 0;
+            } else {
+                gpu.vertex_count = vertices.len() as u32;
+                gpu.vertex_buffer = Some(render_state.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("offscreen-vertex-buffer"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            self.geometry_cache_key = Some(cache_key);
+        }
+
         let uniforms = Uniforms { view_proj };
         render_state
             .queue
             .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-
-        if vertices.is_empty() {
-            gpu.vertex_buffer = None;
-            gpu.vertex_count = 0;
-        } else {
-            gpu.vertex_count = vertices.len() as u32;
-            gpu.vertex_buffer = Some(render_state.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("offscreen-vertex-buffer"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
-        }
 
         let mut encoder =
             render_state
@@ -284,6 +310,27 @@ impl OffscreenRenderer {
 
         self.color_texture = Some(color_texture);
         self.depth_texture = Some(depth_texture);
+    }
+
+    fn build_geometry_cache_key(
+        &self,
+        molecule: Option<&Molecule>,
+        selected_atoms: &[usize],
+        color_fn: ColorFn,
+    ) -> GeometryCacheKey {
+        let mut hasher = DefaultHasher::new();
+        selected_atoms.hash(&mut hasher);
+
+        GeometryCacheKey {
+            molecule_ptr: molecule
+                .map(|mol| mol as *const Molecule as usize)
+                .unwrap_or(0),
+            selected_len: selected_atoms.len(),
+            selected_hash: hasher.finish(),
+            render_style: self.render_style,
+            color_fn_ptr: color_fn as usize,
+            mesh_resolution: self.mesh_resolution,
+        }
     }
 
     fn build_scene_vertices(

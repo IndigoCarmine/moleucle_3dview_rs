@@ -61,12 +61,12 @@ impl InteractiveMoleculeViewport {
 
         self.offscreen.ensure_resources(render_state, width, height)?;
 
-        let selected = self.viewer.selected_atoms();
+        let selected = self.viewer.selected_atoms_ref();
         let view_proj = self.controller.camera.view_projection().data;
         self.offscreen.render_frame(
             render_state,
             self.viewer.molecule.as_ref(),
-            &selected,
+            selected,
             view_proj,
             self.viewer.color_fn,
         )?;

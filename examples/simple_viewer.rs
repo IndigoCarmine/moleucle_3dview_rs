@@ -5,6 +5,7 @@ use moleucle_3dview_rs::{
     RenderStyle,
 };
 use std::path::Path;
+use egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
 
 struct SimpleViewerApp {
     viewport: InteractiveMoleculeViewport,
@@ -32,22 +33,22 @@ impl SimpleViewerApp {
 }
 
 fn load_default_molecule() -> Result<Molecule, String> {
-    let path = Path::new("Benzene.mol2");
+    let path = Path::new("A.pdb");
     if !path.exists() {
         return Err(format!(
-            "Benzene.mol2 not found at {:?}",
+            "A.pdb not found at {:?}",
             std::env::current_dir().map_err(|err| err.to_string())?
         ));
     }
 
-    Molecule::from_mol2(path).map_err(|err| format!("Failed to parse Benzene.mol2: {err}"))
+    Molecule::from_pdb(path).map_err(|err| format!("Failed to parse A.pdb: {err}"))
 }
 
 impl eframe::App for SimpleViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("help").show(ctx, |ui| {
             ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
-            ui.label(format!("Selected atoms: {:?}", self.viewport.selected_atoms()));
+            ui.label(format!("Selected atoms: {}", self.viewport.selected_atoms().len()));
             if let Some(err) = &self.startup_error {
                 ui.colored_label(egui::Color32::YELLOW, err);
             }
@@ -84,7 +85,20 @@ impl eframe::App for SimpleViewerApp {
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]),
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
+                // Prefer Vulkan and fall back to DX12 when Vulkan runtime/driver is unavailable.
+                instance_descriptor: wgpu::InstanceDescriptor {
+                    backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12,
+                    ..Default::default()
+                },
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

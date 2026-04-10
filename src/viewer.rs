@@ -293,11 +293,15 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
 }
 
 impl MoleculeViewer<SelectedAtomRender> {
-    pub fn selected_atoms(&self) -> Vec<usize> {
+    pub fn selected_atoms_ref(&self) -> &[usize] {
         self.additional_render
             .as_ref()
-            .map(|render| render.selected_atoms().to_vec())
-            .unwrap_or_default()
+            .map(|render| render.selected_atoms())
+            .unwrap_or(&[])
+    }
+
+    pub fn selected_atoms(&self) -> Vec<usize> {
+        self.selected_atoms_ref().to_vec()
     }
 
     pub fn set_selected_atoms(&mut self, atom_indices: Vec<usize>) {
