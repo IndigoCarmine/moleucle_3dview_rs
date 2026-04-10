@@ -33,15 +33,15 @@ impl SimpleViewerApp {
 }
 
 fn load_default_molecule() -> Result<Molecule, String> {
-    let path = Path::new("Benzene.mol2");
+    let path = Path::new("A.pdb");
     if !path.exists() {
         return Err(format!(
-            "Benzene.mol2 not found at {:?}",
+            "A.pdb not found at {:?}",
             std::env::current_dir().map_err(|err| err.to_string())?
         ));
     }
 
-    Molecule::from_mol2(path).map_err(|err| format!("Failed to parse Benzene.mol2: {err}"))
+    Molecule::from_pdb(path).map_err(|err| format!("Failed to parse A.pdb: {err}"))
 }
 
 impl eframe::App for SimpleViewerApp {

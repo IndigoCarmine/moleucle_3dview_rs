@@ -41,6 +41,13 @@ pub enum RenderStyle {
     Wireframe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BallstickQuality {
+    High,
+    Medium,
+    Low,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -436,6 +443,29 @@ impl OffscreenRenderer {
         selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
+        let quality = self.pick_ballstick_quality(molecule);
+        let quality_resolution = match quality {
+            BallstickQuality::High => self.mesh_resolution.max(3),
+            BallstickQuality::Medium => (self.mesh_resolution / 2).max(3),
+            BallstickQuality::Low => 3,
+        };
+        let low_mode = matches!(quality, BallstickQuality::Low);
+
+        let generated_meshes = if quality_resolution == self.mesh_resolution {
+            None
+        } else {
+            Some((
+                RenderMesh::new_sphere_uv(1.0, quality_resolution, quality_resolution * 2),
+                RenderMesh::new_cylinder(1.0, 1.0, quality_resolution * 2),
+            ))
+        };
+        let (sphere_mesh, cylinder_mesh): (&RenderMesh, &RenderMesh) =
+            if let Some((sphere, cylinder)) = &generated_meshes {
+                (sphere, cylinder)
+            } else {
+                (&self.sphere_mesh, &self.cylinder_mesh)
+            };
+
         let max_vertices = MAX_RENDER_VERTICES;
         let mut vertices = if let Some(mol) = molecule {
             // Estimate capacity: bonds * ~50 vertices + atoms * ~200 vertices + axes * ~75 vertices
@@ -478,9 +508,19 @@ impl OffscreenRenderer {
 
                 let base_radius = if bond_order <= 1 { 0.15 } else { 0.10 };
                 for offset in line_offsets {
-                    if !append_mesh_triangles(
+                    if low_mode {
+                        if !append_line(
+                            &mut vertices,
+                            a + lateral * offset,
+                            b + lateral * offset,
+                            [0.55, 0.55, 0.55],
+                            max_vertices,
+                        ) {
+                            break 'bonds;
+                        }
+                    } else if !append_mesh_triangles(
                         &mut vertices,
-                        &self.cylinder_mesh,
+                        cylinder_mesh,
                         mid + lateral * offset,
                         orientation,
                         Vec3::new(base_radius, len, base_radius),
@@ -495,13 +535,35 @@ impl OffscreenRenderer {
             'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
-                let radius = if selected_this { 0.56 } else { 0.40 };
+                let radius = match quality {
+                    BallstickQuality::High => {
+                        if selected_this {
+                            0.56
+                        } else {
+                            0.40
+                        }
+                    }
+                    BallstickQuality::Medium => {
+                        if selected_this {
+                            0.48
+                        } else {
+                            0.34
+                        }
+                    }
+                    BallstickQuality::Low => {
+                        if selected_this {
+                            0.40
+                        } else {
+                            0.28
+                        }
+                    }
+                };
                 let color_tuple = color_fn(atom, selected_this);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
                 if !append_mesh_triangles(
                     &mut vertices,
-                    &self.sphere_mesh,
+                    sphere_mesh,
                     pos,
                     Quaternion::new_identity(),
                     Vec3::new(radius, radius, radius),
@@ -516,35 +578,114 @@ impl OffscreenRenderer {
         // xyz axes as cylinders
         let axis_len = 2.0;
         let axis_radius = 0.05;
-        let _ = append_mesh_triangles(
-            &mut vertices,
-            &self.cylinder_mesh,
-            Vec3::new(axis_len * 0.5, 0.0, 0.0),
-            Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
-            Vec3::new(axis_radius, axis_len, axis_radius),
-            [1.0, 0.0, 0.0],
-            max_vertices,
-        );
-        let _ = append_mesh_triangles(
-            &mut vertices,
-            &self.cylinder_mesh,
-            Vec3::new(0.0, axis_len * 0.5, 0.0),
-            Quaternion::new_identity(),
-            Vec3::new(axis_radius, axis_len, axis_radius),
-            [0.0, 1.0, 0.0],
-            max_vertices,
-        );
-        let _ = append_mesh_triangles(
-            &mut vertices,
-            &self.cylinder_mesh,
-            Vec3::new(0.0, 0.0, axis_len * 0.5),
-            Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
-            Vec3::new(axis_radius, axis_len, axis_radius),
-            [0.0, 0.0, 1.0],
-            max_vertices,
-        );
+        if low_mode {
+            let _ = append_line(
+                &mut vertices,
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(axis_len, 0.0, 0.0),
+                [1.0, 0.0, 0.0],
+                max_vertices,
+            );
+            let _ = append_line(
+                &mut vertices,
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, axis_len, 0.0),
+                [0.0, 1.0, 0.0],
+                max_vertices,
+            );
+            let _ = append_line(
+                &mut vertices,
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, axis_len),
+                [0.0, 0.0, 1.0],
+                max_vertices,
+            );
+        } else {
+            let _ = append_mesh_triangles(
+                &mut vertices,
+                cylinder_mesh,
+                Vec3::new(axis_len * 0.5, 0.0, 0.0),
+                Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
+                Vec3::new(axis_radius, axis_len, axis_radius),
+                [1.0, 0.0, 0.0],
+                max_vertices,
+            );
+            let _ = append_mesh_triangles(
+                &mut vertices,
+                cylinder_mesh,
+                Vec3::new(0.0, axis_len * 0.5, 0.0),
+                Quaternion::new_identity(),
+                Vec3::new(axis_radius, axis_len, axis_radius),
+                [0.0, 1.0, 0.0],
+                max_vertices,
+            );
+            let _ = append_mesh_triangles(
+                &mut vertices,
+                cylinder_mesh,
+                Vec3::new(0.0, 0.0, axis_len * 0.5),
+                Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                Vec3::new(axis_radius, axis_len, axis_radius),
+                [0.0, 0.0, 1.0],
+                max_vertices,
+            );
+        }
 
         vertices
+    }
+
+    fn pick_ballstick_quality(&self, molecule: Option<&Molecule>) -> BallstickQuality {
+        let Some(mol) = molecule else {
+            return BallstickQuality::High;
+        };
+
+        let high = self.estimate_ballstick_vertices(mol, BallstickQuality::High);
+        if high <= MAX_RENDER_VERTICES {
+            return BallstickQuality::High;
+        }
+
+        let medium = self.estimate_ballstick_vertices(mol, BallstickQuality::Medium);
+        if medium <= MAX_RENDER_VERTICES {
+            return BallstickQuality::Medium;
+        }
+
+        BallstickQuality::Low
+    }
+
+    fn estimate_ballstick_vertices(&self, molecule: &Molecule, quality: BallstickQuality) -> usize {
+        let resolution = match quality {
+            BallstickQuality::High => self.mesh_resolution.max(3),
+            BallstickQuality::Medium => (self.mesh_resolution / 2).max(3),
+            BallstickQuality::Low => 3,
+        };
+
+        let sphere_vertices_per_atom = resolution
+            .saturating_mul(resolution.saturating_mul(2))
+            .saturating_mul(6);
+        let atom_vertices = molecule
+            .atoms
+            .len()
+            .saturating_mul(sphere_vertices_per_atom);
+
+        let bond_vertices = if matches!(quality, BallstickQuality::Low) {
+            molecule.bonds.len().saturating_mul(2)
+        } else {
+            let cylinder_vertices = (resolution.saturating_mul(2)).saturating_mul(12);
+            let bond_instances = molecule
+                .bonds
+                .iter()
+                .fold(0usize, |acc, bond| acc.saturating_add(bond_line_offsets(bond.order.max(1) as usize).len()));
+            bond_instances.saturating_mul(cylinder_vertices)
+        };
+
+        let axis_vertices = if matches!(quality, BallstickQuality::Low) {
+            6
+        } else {
+            (resolution.saturating_mul(2)).saturating_mul(12).saturating_mul(3)
+        };
+
+        atom_vertices
+            .saturating_add(bond_vertices)
+            .saturating_add(axis_vertices)
     }
 
     fn build_wireframe_vertices(
@@ -712,6 +853,7 @@ struct VSOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) depth01: f32,
 };
 
 struct Uniforms {
@@ -728,9 +870,11 @@ fn vs_main(
     @location(2) color: vec3<f32>,
 ) -> VSOut {
     var out: VSOut;
-    out.position = uniforms.view_proj * vec4<f32>(position, 1.0);
+    let clip = uniforms.view_proj * vec4<f32>(position, 1.0);
+    out.position = clip;
     out.color = color;
     out.normal = normal;
+    out.depth01 = clip.z / clip.w * 0.5 + 0.5;
     return out;
 }
 
@@ -739,8 +883,26 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
     let diffuse = max(dot(n, l), 0.0);
-    let ambient = 0.25;
-    let lit = in.color * (ambient + 0.75 * diffuse);
+    let ambient = 0.22;
+    let standard_lit = in.color * (ambient + 0.78 * diffuse);
+
+    // For deeper fragments, blend toward a sphere-like radial tone.
+    let depth01 = clamp(in.depth01, 0.0, 1.0);
+    let deep_factor = smoothstep(0.60, 0.98, depth01);
+    let radial = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
+
+    let core = in.color * 1.05 + vec3<f32>(0.10, 0.10, 0.10);
+    let mid = in.color;
+    let edge = in.color * 0.28;
+    let center_mix = smoothstep(0.55, 1.0, radial);
+    let radial_mix = smoothstep(0.05, 0.85, radial);
+    var sphere_tone = mix(edge, mix(mid, core, center_mix), radial_mix);
+
+    // Darker rim to emulate the sample's white->base->black feel.
+    let rim = mix(0.72, 1.0, smoothstep(0.0, 0.55, radial));
+    sphere_tone = sphere_tone * rim;
+
+    let lit = mix(standard_lit, sphere_tone, deep_factor);
     return vec4<f32>(lit, 1.0);
 }
 "#
