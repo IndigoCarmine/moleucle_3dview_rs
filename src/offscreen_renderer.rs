@@ -192,6 +192,7 @@ impl OffscreenRendererPreference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderStyle {
     BallStick,
+    BallOnly,
     Wireframe,
 }
 
@@ -425,6 +426,7 @@ impl OffscreenRenderer {
         if let Some(vertices) = rebuilt_vertices {
             let primitive_stride = match self.preference.render_style() {
                 RenderStyle::BallStick => 3,
+                RenderStyle::BallOnly => 3,
                 RenderStyle::Wireframe => 2,
             };
 
@@ -493,6 +495,7 @@ impl OffscreenRenderer {
 
             let pipeline = match self.preference.render_style() {
                 RenderStyle::BallStick => &gpu.pipeline,
+                RenderStyle::BallOnly => &gpu.pipeline,
                 RenderStyle::Wireframe => &gpu.wire_pipeline,
             };
             pass.set_pipeline(pipeline);
@@ -611,6 +614,7 @@ impl OffscreenRenderer {
     ) -> Vec<Vertex> {
         match self.preference.render_style() {
             RenderStyle::BallStick => self.build_ballstick_vertices(molecule, selected_atoms, color_fn),
+            RenderStyle::BallOnly => self.build_ballstick_vertices(molecule, selected_atoms, color_fn),
             RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, selected_atoms, color_fn),
         }
     }
@@ -621,6 +625,8 @@ impl OffscreenRenderer {
         selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
+        let render_style = self.preference.render_style();
+        let include_bonds = !matches!(render_style, RenderStyle::BallOnly);
         let quality = self.pick_ballstick_quality(molecule);
         let mesh_resolution = self.preference.mesh_resolution();
         let quality_resolution = match quality {
@@ -664,54 +670,56 @@ impl OffscreenRenderer {
         if let Some(mol) = molecule {
             let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
 
-            'bonds: for bond in &mol.bonds {
-                let a = mol.atoms[bond.atom_a].position;
-                let b = mol.atoms[bond.atom_b].position;
-                let diff = b - a;
-                let len = diff.magnitude();
-                if len < 0.001 {
-                    continue;
-                }
+            if include_bonds {
+                'bonds: for bond in &mol.bonds {
+                    let a = mol.atoms[bond.atom_a].position;
+                    let b = mol.atoms[bond.atom_b].position;
+                    let diff = b - a;
+                    let len = diff.magnitude();
+                    if len < 0.001 {
+                        continue;
+                    }
 
-                let dir = diff.to_normalized();
-                let up = Vec3::new(0.0, 1.0, 0.0);
-                let orientation = Quaternion::from_unit_vecs(up, dir);
-                let mid = (a + b) * 0.5;
+                    let dir = diff.to_normalized();
+                    let up = Vec3::new(0.0, 1.0, 0.0);
+                    let orientation = Quaternion::from_unit_vecs(up, dir);
+                    let mid = (a + b) * 0.5;
 
-                let bond_order = bond.order.max(1) as usize;
-                let line_offsets = bond_line_offsets(bond_order);
-                let mut lateral = Vec3::new(1.0, 0.0, 0.0);
-                if dir.dot(lateral).abs() > 0.9 {
-                    lateral = Vec3::new(0.0, 0.0, 1.0);
-                }
-                lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
+                    let bond_order = bond.order.max(1) as usize;
+                    let line_offsets = bond_line_offsets(bond_order);
+                    let mut lateral = Vec3::new(1.0, 0.0, 0.0);
+                    if dir.dot(lateral).abs() > 0.9 {
+                        lateral = Vec3::new(0.0, 0.0, 1.0);
+                    }
+                    lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
 
-                let base_radius = if bond_order <= 1 {
-                    default_ball_stick_bond_radius()
-                } else {
-                    default_ball_stick_bond_radius() * 0.67
-                };
-                for offset in line_offsets {
-                    if low_mode {
-                        if !append_line(
+                    let base_radius = if bond_order <= 1 {
+                        default_ball_stick_bond_radius()
+                    } else {
+                        default_ball_stick_bond_radius() * 0.67
+                    };
+                    for offset in line_offsets {
+                        if low_mode {
+                            if !append_line(
+                                &mut vertices,
+                                a + lateral * offset,
+                                b + lateral * offset,
+                                [0.55, 0.55, 0.55],
+                                max_vertices,
+                            ) {
+                                break 'bonds;
+                            }
+                        } else if !append_mesh_triangles(
                             &mut vertices,
-                            a + lateral * offset,
-                            b + lateral * offset,
+                            cylinder_mesh,
+                            mid + lateral * offset,
+                            orientation,
+                            Vec3::new(base_radius, len, base_radius),
                             [0.55, 0.55, 0.55],
                             max_vertices,
                         ) {
                             break 'bonds;
                         }
-                    } else if !append_mesh_triangles(
-                        &mut vertices,
-                        cylinder_mesh,
-                        mid + lateral * offset,
-                        orientation,
-                        Vec3::new(base_radius, len, base_radius),
-                        [0.55, 0.55, 0.55],
-                        max_vertices,
-                    ) {
-                        break 'bonds;
                     }
                 }
             }
@@ -742,59 +750,61 @@ impl OffscreenRenderer {
             }
         }
 
-        // xyz axes as cylinders
-        let axis_len = 2.0;
-        let axis_radius = 0.05;
-        if low_mode {
-            let _ = append_line(
-                &mut vertices,
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(axis_len, 0.0, 0.0),
-                [1.0, 0.0, 0.0],
-                max_vertices,
-            );
-            let _ = append_line(
-                &mut vertices,
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, axis_len, 0.0),
-                [0.0, 1.0, 0.0],
-                max_vertices,
-            );
-            let _ = append_line(
-                &mut vertices,
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, axis_len),
-                [0.0, 0.0, 1.0],
-                max_vertices,
-            );
-        } else {
-            let _ = append_mesh_triangles(
-                &mut vertices,
-                cylinder_mesh,
-                Vec3::new(axis_len * 0.5, 0.0, 0.0),
-                Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
-                Vec3::new(axis_radius, axis_len, axis_radius),
-                [1.0, 0.0, 0.0],
-                max_vertices,
-            );
-            let _ = append_mesh_triangles(
-                &mut vertices,
-                cylinder_mesh,
-                Vec3::new(0.0, axis_len * 0.5, 0.0),
-                Quaternion::new_identity(),
-                Vec3::new(axis_radius, axis_len, axis_radius),
-                [0.0, 1.0, 0.0],
-                max_vertices,
-            );
-            let _ = append_mesh_triangles(
-                &mut vertices,
-                cylinder_mesh,
-                Vec3::new(0.0, 0.0, axis_len * 0.5),
-                Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
-                Vec3::new(axis_radius, axis_len, axis_radius),
-                [0.0, 0.0, 1.0],
-                max_vertices,
-            );
+        if include_bonds {
+            // xyz axes as cylinders
+            let axis_len = 2.0;
+            let axis_radius = 0.05;
+            if low_mode {
+                let _ = append_line(
+                    &mut vertices,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(axis_len, 0.0, 0.0),
+                    [1.0, 0.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_line(
+                    &mut vertices,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, axis_len, 0.0),
+                    [0.0, 1.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_line(
+                    &mut vertices,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, axis_len),
+                    [0.0, 0.0, 1.0],
+                    max_vertices,
+                );
+            } else {
+                let _ = append_mesh_triangles(
+                    &mut vertices,
+                    cylinder_mesh,
+                    Vec3::new(axis_len * 0.5, 0.0, 0.0),
+                    Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
+                    Vec3::new(axis_radius, axis_len, axis_radius),
+                    [1.0, 0.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_mesh_triangles(
+                    &mut vertices,
+                    cylinder_mesh,
+                    Vec3::new(0.0, axis_len * 0.5, 0.0),
+                    Quaternion::new_identity(),
+                    Vec3::new(axis_radius, axis_len, axis_radius),
+                    [0.0, 1.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_mesh_triangles(
+                    &mut vertices,
+                    cylinder_mesh,
+                    Vec3::new(0.0, 0.0, axis_len * 0.5),
+                    Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                    Vec3::new(axis_radius, axis_len, axis_radius),
+                    [0.0, 0.0, 1.0],
+                    max_vertices,
+                );
+            }
         }
 
         vertices
