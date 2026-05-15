@@ -72,7 +72,11 @@ impl LodDistanceWorker {
 
             while !worker_stop.load(Ordering::Relaxed) {
                 let interval = {
-                    let settings = worker_settings.lock().ok().map(|guard| *guard).unwrap_or_default();
+                    let settings = worker_settings
+                        .lock()
+                        .ok()
+                        .map(|guard| *guard)
+                        .unwrap_or_default();
                     let fps = settings.distance_check_fps.max(1.0);
                     Duration::from_secs_f32(1.0 / fps)
                 };
@@ -93,7 +97,11 @@ impl LodDistanceWorker {
                     continue;
                 };
 
-                let settings = worker_settings.lock().ok().map(|guard| *guard).unwrap_or_default();
+                let settings = worker_settings
+                    .lock()
+                    .ok()
+                    .map(|guard| *guard)
+                    .unwrap_or_default();
                 if !settings.enabled {
                     continue;
                 }
@@ -346,7 +354,8 @@ impl OffscreenRenderer {
             return;
         }
 
-        let mesh_resolution_changed = self.preference.mesh_resolution() != preference.mesh_resolution();
+        let mesh_resolution_changed =
+            self.preference.mesh_resolution() != preference.mesh_resolution();
         self.preference = preference;
 
         if mesh_resolution_changed {
@@ -379,7 +388,8 @@ impl OffscreenRenderer {
             self.gpu = Some(create_gpu_resources(&render_state.device));
         }
 
-        let needs_rebuild = self.color_texture.is_none() || self.width != width || self.height != height;
+        let needs_rebuild =
+            self.color_texture.is_none() || self.width != width || self.height != height;
         if needs_rebuild {
             self.width = width;
             self.height = height;
@@ -613,9 +623,15 @@ impl OffscreenRenderer {
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
         match self.preference.render_style() {
-            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, selected_atoms, color_fn),
-            RenderStyle::BallOnly => self.build_ballstick_vertices(molecule, selected_atoms, color_fn),
-            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, selected_atoms, color_fn),
+            RenderStyle::BallStick => {
+                self.build_ballstick_vertices(molecule, selected_atoms, color_fn)
+            }
+            RenderStyle::BallOnly => {
+                self.build_ballstick_vertices(molecule, selected_atoms, color_fn)
+            }
+            RenderStyle::Wireframe => {
+                self.build_wireframe_vertices(molecule, selected_atoms, color_fn)
+            }
         }
     }
 
@@ -696,7 +712,7 @@ impl OffscreenRenderer {
                     let base_radius = if bond_order <= 1 {
                         default_ball_stick_bond_radius()
                     } else {
-                        default_ball_stick_bond_radius() * 0.67
+                        default_ball_stick_bond_radius() * 0.5
                     };
                     for offset in line_offsets {
                         if low_mode {
@@ -781,7 +797,10 @@ impl OffscreenRenderer {
                     &mut vertices,
                     cylinder_mesh,
                     Vec3::new(axis_len * 0.5, 0.0, 0.0),
-                    Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
+                    Quaternion::from_axis_angle(
+                        Vec3::new(0.0, 0.0, 1.0),
+                        -std::f32::consts::FRAC_PI_2,
+                    ),
                     Vec3::new(axis_radius, axis_len, axis_radius),
                     [1.0, 0.0, 0.0],
                     max_vertices,
@@ -799,7 +818,10 @@ impl OffscreenRenderer {
                     &mut vertices,
                     cylinder_mesh,
                     Vec3::new(0.0, 0.0, axis_len * 0.5),
-                    Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+                    Quaternion::from_axis_angle(
+                        Vec3::new(1.0, 0.0, 0.0),
+                        std::f32::consts::FRAC_PI_2,
+                    ),
                     Vec3::new(axis_radius, axis_len, axis_radius),
                     [0.0, 0.0, 1.0],
                     max_vertices,
@@ -847,17 +869,18 @@ impl OffscreenRenderer {
             molecule.bonds.len().saturating_mul(2)
         } else {
             let cylinder_vertices = DEFAULT_BOND_CYLINDER_SIDES.saturating_mul(6);
-            let bond_instances = molecule
-                .bonds
-                .iter()
-                .fold(0usize, |acc, bond| acc.saturating_add(bond_line_offsets(bond.order.max(1) as usize).len()));
+            let bond_instances = molecule.bonds.iter().fold(0usize, |acc, bond| {
+                acc.saturating_add(bond_line_offsets(bond.order.max(1) as usize).len())
+            });
             bond_instances.saturating_mul(cylinder_vertices)
         };
 
         let axis_vertices = if matches!(quality, BallstickQuality::Low) {
             6
         } else {
-            (resolution.saturating_mul(2)).saturating_mul(12).saturating_mul(3)
+            (resolution.saturating_mul(2))
+                .saturating_mul(12)
+                .saturating_mul(3)
         };
 
         atom_vertices
@@ -909,7 +932,13 @@ impl OffscreenRenderer {
                 let bond_order = bond.order.max(1) as usize;
                 for offset in bond_line_offsets(bond_order) {
                     let off = lateral * offset;
-                    if !append_line(&mut vertices, a + off, b + off, [0.70, 0.70, 0.72], max_vertices) {
+                    if !append_line(
+                        &mut vertices,
+                        a + off,
+                        b + off,
+                        [0.70, 0.70, 0.72],
+                        max_vertices,
+                    ) {
                         break 'bonds;
                     }
                 }
@@ -1002,10 +1031,7 @@ fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
 
     let initial_uniforms = Uniforms {
         view_proj: [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ],
     };
     let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1255,12 +1281,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 
 fn bond_line_offsets(order: usize) -> Vec<f32> {
+    const DEFAULT_BOND_SPACING: f32 = 0.01;
     match order {
         0 | 1 => vec![0.0],
-        2 => vec![-0.16, 0.16],
-        3 => vec![-0.26, 0.0, 0.26],
+        2 => vec![-DEFAULT_BOND_SPACING, DEFAULT_BOND_SPACING],
+        3 => vec![-DEFAULT_BOND_SPACING, 0.0, DEFAULT_BOND_SPACING],
         n => {
-            let spacing = 0.14;
+            let spacing = DEFAULT_BOND_SPACING;
             let half = (n as f32 - 1.0) * 0.5;
             (0..n).map(|i| (i as f32 - half) * spacing).collect()
         }
@@ -1277,13 +1304,24 @@ fn append_mesh_triangles(
     max_vertices: usize,
 ) -> bool {
     let inv_scale = Vec3::new(
-        if scale.x.abs() > 1e-6 { 1.0 / scale.x } else { 0.0 },
-        if scale.y.abs() > 1e-6 { 1.0 / scale.y } else { 0.0 },
-        if scale.z.abs() > 1e-6 { 1.0 / scale.z } else { 0.0 },
+        if scale.x.abs() > 1e-6 {
+            1.0 / scale.x
+        } else {
+            0.0
+        },
+        if scale.y.abs() > 1e-6 {
+            1.0 / scale.y
+        } else {
+            0.0
+        },
+        if scale.z.abs() > 1e-6 {
+            1.0 / scale.z
+        } else {
+            0.0
+        },
     );
 
     for tri in mesh.indices.chunks_exact(3) {
-
         if out.len().saturating_add(3) > max_vertices {
             return false;
         }
@@ -1327,7 +1365,7 @@ impl RenderMesh {
     fn new_sphere_uv(radius: f32, lat_segments: usize, lon_segments: usize) -> Self {
         let vertex_count = (lat_segments + 1) * (lon_segments + 1);
         let index_count = lat_segments * lon_segments * 6; // 2 triangles per quad
-        
+
         let mut vertices = Vec::with_capacity(vertex_count);
         let mut indices = Vec::with_capacity(index_count);
 
@@ -1379,7 +1417,7 @@ impl RenderMesh {
         // Pre-calculate capacities
         let vertex_capacity = sides * 2; // Side vertices only
         let index_capacity = sides * 6; // Side quads (2 triangles each)
-        
+
         let mut vertices = Vec::with_capacity(vertex_capacity);
         let mut indices = Vec::with_capacity(index_capacity);
         let half = len * 0.5;
@@ -1420,7 +1458,13 @@ impl RenderMesh {
     }
 }
 
-fn append_line(out: &mut Vec<Vertex>, a: Vec3, b: Vec3, color: [f32; 3], max_vertices: usize) -> bool {
+fn append_line(
+    out: &mut Vec<Vertex>,
+    a: Vec3,
+    b: Vec3,
+    color: [f32; 3],
+    max_vertices: usize,
+) -> bool {
     if out.len().saturating_add(2) > max_vertices {
         return false;
     }

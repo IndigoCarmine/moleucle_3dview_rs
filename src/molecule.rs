@@ -2,19 +2,20 @@ use crate::atom_radii::vdw_radius;
 use lin_alg::f32::Vec3;
 use std::path::Path;
 
+const ANGSTROM_TO_NANOMETER: f32 = 0.1;
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub position: Vec3,
     pub element: String,
     pub id: usize,
     // PDB-specific attributes (optional for MOL2)
-    pub name: Option<String>,           // Atom identifier (e.g., "CA", "C00")
-    pub res_name: Option<String>,       // Residue name (e.g., "ALA")
-    pub chain_id: Option<char>,         // Chain identifier (e.g., 'A')
-    pub res_seq: Option<i32>,           // Residue sequence number
-    pub occupancy: Option<f32>,         // Occupancy factor (0.0-1.0)
-    pub temp_factor: Option<f32>,       // Temperature factor
-    pub charge: Option<String>,         // Formal charge
+    pub name: Option<String>,     // Atom identifier (e.g., "CA", "C00")
+    pub res_name: Option<String>, // Residue name (e.g., "ALA")
+    pub chain_id: Option<char>,   // Chain identifier (e.g., 'A')
+    pub res_seq: Option<i32>,     // Residue sequence number
+    pub occupancy: Option<f32>,   // Occupancy factor (0.0-1.0)
+    pub temp_factor: Option<f32>, // Temperature factor
+    pub charge: Option<String>,   // Formal charge
 }
 
 #[derive(Debug, Clone)]
@@ -155,9 +156,11 @@ impl Molecule {
                     if let (Some(x_str), Some(y_str), Some(z_str)) =
                         (parts.next(), parts.next(), parts.next())
                     {
-                        if let (Ok(x), Ok(y), Ok(z)) =
-                            (x_str.parse::<f32>(), y_str.parse::<f32>(), z_str.parse::<f32>())
-                        {
+                        if let (Ok(x), Ok(y), Ok(z)) = (
+                            x_str.parse::<f32>(),
+                            y_str.parse::<f32>(),
+                            z_str.parse::<f32>(),
+                        ) {
                             let element = parts
                                 .next()
                                 .and_then(|type_str| type_str.split('.').next())
@@ -165,7 +168,11 @@ impl Molecule {
                                 .unwrap_or_else(|| "?".to_string());
 
                             atoms.push(Atom {
-                                position: Vec3::new(x, y, z),
+                                position: Vec3::new(
+                                    x * ANGSTROM_TO_NANOMETER,
+                                    y * ANGSTROM_TO_NANOMETER,
+                                    z * ANGSTROM_TO_NANOMETER,
+                                ),
                                 element,
                                 id: atoms.len() + 1,
                                 name: None,
@@ -187,7 +194,7 @@ impl Molecule {
 
                     let a_id: Option<usize> = parts.next().and_then(|s| s.parse().ok());
                     let b_id: Option<usize> = parts.next().and_then(|s| s.parse().ok());
-                    
+
                     if let (Some(a_id), Some(b_id)) = (a_id, b_id) {
                         let order = match parts.next() {
                             Some("2") => 2u8,
@@ -195,7 +202,7 @@ impl Molecule {
                             Some("ar") => 1u8,
                             _ => 1u8,
                         };
-                        
+
                         // Adjust 1-based to 0-based
                         if a_id > 0 && b_id > 0 && a_id <= atoms.len() && b_id <= atoms.len() {
                             bonds.push(Bond {
@@ -220,7 +227,7 @@ impl Molecule {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut atom_records = Vec::new();
         let mut conect_bonds = Vec::new();
-        
+
         // Pre-allocate with typical capacities
         atom_records.reserve(256);
         conect_bonds.reserve(256);
@@ -241,9 +248,12 @@ impl Molecule {
                                 for i in 0..4 {
                                     let start = 11 + i * 5;
                                     if start + 5 <= line.len() {
-                                        if let Ok(atom2) = line[start..start+5].trim().parse::<usize>() {
+                                        if let Ok(atom2) =
+                                            line[start..start + 5].trim().parse::<usize>()
+                                        {
                                             if atom2 > 0 && atom1 < atom2 {
-                                                conect_bonds.push((atom1 - 1, atom2 - 1)); // Convert to 0-based
+                                                conect_bonds.push((atom1 - 1, atom2 - 1));
+                                                // Convert to 0-based
                                             }
                                         }
                                     }
@@ -261,7 +271,11 @@ impl Molecule {
             .iter()
             .enumerate()
             .map(|(idx, record)| Atom {
-                position: Vec3::new(record.x, record.y, record.z),
+                position: Vec3::new(
+                    record.x * ANGSTROM_TO_NANOMETER,
+                    record.y * ANGSTROM_TO_NANOMETER,
+                    record.z * ANGSTROM_TO_NANOMETER,
+                ),
                 element: extract_element_symbol(&record.element, &record.name),
                 id: idx,
                 name: Some(record.name.clone()),
@@ -367,4 +381,3 @@ fn extract_element_symbol(element: &str, atom_name: &str) -> String {
             .unwrap_or_else(|| "?".to_string())
     }
 }
-

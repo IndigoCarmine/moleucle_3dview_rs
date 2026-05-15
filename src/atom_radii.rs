@@ -2,8 +2,8 @@
 
 const ANGSTROM_TO_NM: f32 = 0.1;
 
-pub const BALL_STICK_ATOM_SCALE: f32 = 0.6;
-pub const BALL_STICK_SELECTED_ATOM_SCALE: f32 = 0.85;
+pub const BALL_STICK_ATOM_SCALE: f32 = 0.3;
+pub const BALL_STICK_SELECTED_ATOM_SCALE: f32 = 0.5;
 pub const DEFAULT_BOND_RADIUS_SCALE: f32 = 0.5;
 
 /// Return an approximate van der Waals radius in nanometers.
