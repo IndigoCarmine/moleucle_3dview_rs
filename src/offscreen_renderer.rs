@@ -768,8 +768,8 @@ impl OffscreenRenderer {
 
         if include_bonds {
             // xyz axes as cylinders
-            let axis_len = 2.0;
-            let axis_radius = 0.05;
+            let axis_len = 0.2;
+            let axis_radius = 0.01;
             if low_mode {
                 let _ = append_line(
                     &mut vertices,
