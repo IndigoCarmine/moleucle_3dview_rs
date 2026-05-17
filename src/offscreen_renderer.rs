@@ -947,7 +947,7 @@ impl OffscreenRenderer {
             'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
                 let selected_this = selected.contains(&idx);
-                let span = if selected_this { 0.22 } else { 0.14 };
+                let span = if selected_this { 0.04 } else { 0.02 };
                 let color_tuple = color_fn(atom, selected_this);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
