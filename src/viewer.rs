@@ -1,7 +1,9 @@
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::molecule::{Atom, Molecule};
 use crate::scene_types::{Entity, Mesh, Scene};
-use crate::{AdditionalRender, SelectedAtomRender};
+use crate::AdditionalRender;
+use crate::render_state::SharedRenderStates;
+// Viewer no longer owns shared state; state is passed in by the caller (viewport or user).
 use lin_alg::f32::{Quaternion, Vec3};
 
 #[derive(Debug, Clone)]
@@ -28,19 +30,19 @@ pub fn default_color_fn(atom: &Atom, _is_selected: bool) -> (f32, f32, f32) {
     }
 }
 
-pub struct MoleculeViewer<T: AdditionalRender> {
+pub struct MoleculeViewer {
     pub molecule: Option<Molecule>,
     pub dirty: bool,
-    pub additional_render: Option<Box<T>>,
+    pub additional_render: Vec<Box<dyn AdditionalRender>>,
     pub color_fn: ColorFn,
 }
 
-impl<T: AdditionalRender> MoleculeViewer<T> {
+impl MoleculeViewer {
     pub fn new() -> Self {
         Self {
             molecule: None,
             dirty: false,
-            additional_render: None,
+            additional_render: Vec::new(),
             color_fn: default_color_fn,
         }
     }
@@ -50,7 +52,7 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
         Self {
             molecule: None,
             dirty: false,
-            additional_render: None,
+            additional_render: Vec::new(),
             color_fn,
         }
     }
@@ -66,6 +68,18 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
         self.dirty = true;
     }
 
+    pub fn add_additional_render<R: AdditionalRender + 'static>(&mut self, render: R) {
+        // keep the render's ownership and mark dirty
+        self.additional_render.push(Box::new(render));
+        self.dirty = true;
+    }
+
+    /// Add a boxed `AdditionalRender` directly.
+    pub fn add_additional_render_box(&mut self, render: Box<dyn AdditionalRender>) {
+        self.additional_render.push(render);
+        self.dirty = true;
+    }
+
     pub fn pick(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<ViewerEvent> {
         let mut closest_t = f32::MAX;
         let mut picked = None;
@@ -74,7 +88,9 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             // Check Atoms
             for (i, atom) in mol.atoms.iter().enumerate() {
                 let radius = ball_stick_radius(&atom.element, false);
-                if let Some(t) = Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius) {
+                if let Some(t) =
+                    Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius)
+                {
                     if t < closest_t && t > 0.0 {
                         closest_t = t;
                         picked = Some(ViewerEvent::AtomClicked(i));
@@ -97,7 +113,9 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             }
         }
 
-        picked.or(Some(ViewerEvent::NothingClicked))
+        let result = picked.unwrap_or(ViewerEvent::NothingClicked);
+
+        Some(result)
     }
 
     fn ray_sphere_intersect(
@@ -153,7 +171,9 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
     }
 
     /// Updates the graphics scene based on the current molecule data.
-    pub fn update_scene(&mut self, scene: &mut Scene) {
+    ///
+    /// `states` is a map of per-renderer states supplied by the caller (e.g., the viewport).
+    pub fn update_scene(&mut self, scene: &mut Scene, states: &SharedRenderStates) {
         if !self.dirty {
             return;
         }
@@ -283,39 +303,9 @@ impl<T: AdditionalRender> MoleculeViewer<T> {
             z_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
             scene.entities.push(z_axis);
 
-
-
-
-            if let Some(additional_render) = &self.additional_render {
-                additional_render.update_scene(scene, mol);
+            for render in &self.additional_render {
+                render.update_scene(scene, mol, states);
             }
-        }
-    }
-}
-
-impl MoleculeViewer<SelectedAtomRender> {
-    pub fn selected_atoms_ref(&self) -> &[usize] {
-        self.additional_render
-            .as_ref()
-            .map(|render| render.selected_atoms())
-            .unwrap_or(&[])
-    }
-
-    pub fn selected_atoms(&self) -> Vec<usize> {
-        self.selected_atoms_ref().to_vec()
-    }
-
-    pub fn set_selected_atoms(&mut self, atom_indices: Vec<usize>) {
-        if let Some(render) = self.additional_render.as_mut() {
-            render.set_selected_atoms(atom_indices);
-            self.dirty = true;
-        }
-    }
-
-    pub fn clear_selected_atoms(&mut self) {
-        if let Some(render) = self.additional_render.as_mut() {
-            render.clear_selected_atoms();
-            self.dirty = true;
         }
     }
 }

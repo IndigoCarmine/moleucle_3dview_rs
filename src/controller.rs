@@ -1,5 +1,4 @@
 use crate::{
-    additional_render::AdditionalRender,
     camera::Camera,
     scene_types::Scene,
     viewer::{MoleculeViewer, ViewerEvent},
@@ -68,12 +67,7 @@ impl<T: Camera + Default> CameraController<T> {
     /// - Shift + MMB: pan
     /// - Ctrl + MMB: dolly
     /// - LMB: pick
-    pub fn handle_event<U: AdditionalRender>(
-        &mut self,
-        event: &WindowEvent,
-        _scene: &Scene,
-        viewer: &MoleculeViewer<U>,
-    ) -> (Option<ViewerEvent>, EngineUpdates) {
+    pub fn handle_event(&mut self, event: &WindowEvent, _scene: &Scene, viewer: &MoleculeViewer) -> (Option<ViewerEvent>, EngineUpdates) {
         let mut updates = EngineUpdates::default();
         let mut picked_event = None;
 

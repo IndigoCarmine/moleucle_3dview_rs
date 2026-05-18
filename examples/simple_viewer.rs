@@ -1,11 +1,9 @@
 use eframe::egui;
-use moleucle_3dview_rs::{
-    InteractiveMoleculeViewport,
-    Molecule,
-    RenderStyle,
-};
-use std::path::Path;
 use egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
+use moleucle_3dview_rs::render_state::{get_state_clone_by_type, set_state_by_type};
+use moleucle_3dview_rs::AdditionalRender;
+use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, RenderStyle};
+use std::path::Path;
 
 struct SimpleViewerApp {
     viewport: InteractiveMoleculeViewport,
@@ -13,9 +11,58 @@ struct SimpleViewerApp {
     startup_error: Option<String>,
 }
 
+#[derive(Clone)]
+struct ExampleStateRender;
+
+impl ExampleStateRender {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl AdditionalRender for ExampleStateRender {
+    fn update_scene(
+        &self,
+        scene: &mut moleucle_3dview_rs::Scene,
+        _molecule: &moleucle_3dview_rs::Molecule,
+        states: &moleucle_3dview_rs::SharedRenderStates,
+    ) {
+        // read a counter from state, default 0
+        let count: usize = get_state_clone_by_type::<usize>(states).unwrap_or(0usize);
+
+        // draw a small sphere whose color depends on count
+        let color = match count % 3 {
+            0 => (1.0, 0.0, 0.0),
+            1 => (0.0, 1.0, 0.0),
+            _ => (0.0, 0.0, 1.0),
+        };
+
+        // place sphere at top-left of scene for demo
+        let pos = lin_alg::f32::Vec3::new(0.0, 0.0, 0.0);
+        let sphere_mesh = moleucle_3dview_rs::Mesh::new_sphere(1.0, 8);
+        let mesh_idx = scene.meshes.len();
+        scene.meshes.push(sphere_mesh);
+        let entity = moleucle_3dview_rs::Entity::new(
+            mesh_idx,
+            pos,
+            lin_alg::f32::Quaternion::new_identity(),
+            0.2,
+            color,
+            0.2,
+        );
+        scene.entities.push(entity);
+
+        // increment and store counter for next frame
+        set_state_by_type(states, count + 1usize);
+    }
+}
+
 impl SimpleViewerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut viewport = InteractiveMoleculeViewport::new();
+        // register an example per-render state renderer
+        let example = ExampleStateRender::new();
+        viewport.add_additional_render_box(Box::new(example));
         let startup_error = match load_default_molecule() {
             Ok(molecule) => {
                 viewport.set_molecule(molecule);
@@ -48,7 +95,10 @@ impl eframe::App for SimpleViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("help").show(ctx, |ui| {
             ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
-            ui.label(format!("Selected atoms: {}", self.viewport.selected_atoms().len()));
+            ui.label(format!(
+                "Selected atoms: {}",
+                self.viewport.selected_atoms().len()
+            ));
             if let Some(err) = &self.startup_error {
                 ui.colored_label(egui::Color32::YELLOW, err);
             }
@@ -115,7 +165,10 @@ impl eframe::App for SimpleViewerApp {
             };
 
             if let Err(err) = self.viewport.show(ctx, ui, render_state) {
-                ui.colored_label(egui::Color32::RED, format!("Offscreen render failed: {err}"));
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("Offscreen render failed: {err}"),
+                );
             }
         });
 

@@ -1,32 +1,35 @@
 use crate::{
-    camera,
-    Camera,
-    CameraController,
-    Molecule,
-    MoleculeViewer,
-    offscreen_renderer::LodSettings,
-    OffscreenRenderer,
-    RenderStyle,
-    SelectedAtomRender,
+    camera, offscreen_renderer::LodSettings, Camera, CameraController, Molecule, MoleculeViewer,
+    OffscreenRenderer, RenderStyle,
+};
+use crate::render_state::{
+    new_shared_states, get_state_clone_by_type, set_state_by_type, SharedRenderStates,
 };
 use eframe::egui::{self, PointerButton, Sense};
 
 pub struct InteractiveMoleculeViewport {
-    viewer: MoleculeViewer<SelectedAtomRender>,
+    viewer: MoleculeViewer,
     controller: CameraController<camera::OrbitalCamera>,
     offscreen: OffscreenRenderer,
+    shared_states: SharedRenderStates,
 }
 
 impl InteractiveMoleculeViewport {
     pub fn new() -> Self {
-        let mut viewer = MoleculeViewer::new();
-        viewer.additional_render = Some(Box::new(SelectedAtomRender::new()));
+        let viewer = MoleculeViewer::new();
+        let shared_states = new_shared_states();
 
         Self {
             viewer,
             controller: CameraController::<camera::OrbitalCamera>::new(),
             offscreen: OffscreenRenderer::new(),
+            shared_states,
         }
+    }
+
+    /// Expose a way to add an AdditionalRender to the internal viewer from callers.
+    pub fn add_additional_render_box(&mut self, render: Box<dyn crate::AdditionalRender>) {
+        self.viewer.add_additional_render_box(render);
     }
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
@@ -34,7 +37,7 @@ impl InteractiveMoleculeViewport {
     }
 
     pub fn selected_atoms(&self) -> Vec<usize> {
-        self.viewer.selected_atoms()
+        get_state_clone_by_type::<Vec<usize>>(&self.shared_states).unwrap_or_default()
     }
 
     pub fn render_style(&self) -> RenderStyle {
@@ -74,7 +77,9 @@ impl InteractiveMoleculeViewport {
         let available = ui.available_size_before_wrap();
         let width = available.x.max(1.0) as u32;
         let height = available.y.max(1.0) as u32;
-        self.controller.camera.set_aspect(width as f32 / height as f32);
+        self.controller
+            .camera
+            .set_aspect(width as f32 / height as f32);
 
         if let Some(molecule) = self.viewer.molecule.as_ref() {
             let camera_position = self.controller.camera.position();
@@ -82,14 +87,15 @@ impl InteractiveMoleculeViewport {
             self.offscreen.submit_lod_distance(distance);
         }
 
-        self.offscreen.ensure_resources(render_state, width, height)?;
+        self.offscreen
+            .ensure_resources(render_state, width, height)?;
 
-        let selected = self.viewer.selected_atoms_ref();
+        let selected: Vec<usize> = get_state_clone_by_type::<Vec<usize>>(&self.shared_states).unwrap_or_default();
         let view_proj = self.controller.camera.view_projection().data;
         self.offscreen.render_frame(
             render_state,
             self.viewer.molecule.as_ref(),
-            selected,
+            selected.as_slice(),
             view_proj,
             self.viewer.color_fn,
         )?;
@@ -136,7 +142,9 @@ impl InteractiveMoleculeViewport {
                         .camera
                         .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
                 } else {
-                    self.controller.camera.orbit(delta.x * 0.005, delta.y * 0.005);
+                    self.controller
+                        .camera
+                        .orbit(delta.x * 0.005, delta.y * 0.005);
                 }
             }
         }
@@ -154,13 +162,13 @@ impl InteractiveMoleculeViewport {
                 if let Some(crate::viewer::ViewerEvent::AtomClicked(i)) =
                     self.viewer.pick(ray_origin, ray_dir)
                 {
-                    let mut selected = self.viewer.selected_atoms();
+                    let mut selected: Vec<usize> = get_state_clone_by_type::<Vec<usize>>(&self.shared_states).unwrap_or_default();
                     if let Some(pos) = selected.iter().position(|&index| index == i) {
                         selected.remove(pos);
                     } else {
                         selected.push(i);
                     }
-                    self.viewer.set_selected_atoms(selected);
+                    set_state_by_type(&self.shared_states, selected);
                 }
             }
         }
