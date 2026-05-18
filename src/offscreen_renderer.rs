@@ -1,12 +1,12 @@
+use crate::additional_render::AdditionalRender;
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
+use crate::render_state::SharedRenderStates;
+use crate::scene_types::Scene;
 use crate::viewer::ColorFn;
 use crate::Molecule;
 use egui::TextureId;
 use egui_wgpu::wgpu;
 use lin_alg::f32::{Quaternion, Vec3};
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -227,18 +227,19 @@ struct Uniforms {
 
 struct GpuResources {
     pipeline: wgpu::RenderPipeline,
+    additional_pipeline: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_count: u32,
+    additional_vertex_buffer: Option<wgpu::Buffer>,
+    additional_vertex_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GeometryCacheKey {
     molecule_ptr: usize,
-    selected_len: usize,
-    selected_hash: u64,
     render_style: RenderStyle,
     color_fn_ptr: usize,
     mesh_resolution: usize,
@@ -256,6 +257,7 @@ pub struct OffscreenRenderer {
     cylinder_mesh: RenderMesh,
     geometry_cache_key: Option<GeometryCacheKey>,
     lod_worker: LodDistanceWorker,
+    additional_renders: Vec<Box<dyn AdditionalRender>>,
 }
 
 impl OffscreenRenderer {
@@ -298,6 +300,7 @@ impl OffscreenRenderer {
             cylinder_mesh: RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides),
             geometry_cache_key: None,
             lod_worker: LodDistanceWorker::new(lod_settings),
+            additional_renders: Vec::new(),
         }
     }
 
@@ -399,13 +402,17 @@ impl OffscreenRenderer {
         Ok(())
     }
 
+    pub fn add_additional_render(&mut self, render: Box<dyn AdditionalRender>) {
+        self.additional_renders.push(render);
+    }
+
     pub fn render_frame(
         &mut self,
         render_state: &egui_wgpu::RenderState,
         molecule: Option<&Molecule>,
-        selected_atoms: &[usize],
         view_proj: [f32; 16],
         color_fn: ColorFn,
+        additionalstate: Option<SharedRenderStates>,
     ) -> Result<(), String> {
         self.apply_pending_lod_resolution();
 
@@ -421,12 +428,27 @@ impl OffscreenRenderer {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let cache_key = self.build_geometry_cache_key(molecule, selected_atoms, color_fn);
+        let cache_key = self.build_geometry_cache_key(molecule, color_fn);
         let rebuilt_vertices = if self.geometry_cache_key != Some(cache_key) {
-            Some(self.build_scene_vertices(molecule, selected_atoms, color_fn))
+            Some(self.build_scene_vertices(molecule, color_fn))
         } else {
             None
         };
+        let mut additional_scene = Scene {
+            meshes: Vec::new(),
+            entities: Vec::new(),
+        };
+        if let Some(additionalstate) = additionalstate {
+            for additional in &self.additional_renders {
+                additional.update_scene(
+                    &mut additional_scene,
+                    molecule.unwrap_or(&Molecule::default()),
+                    &additionalstate,
+                );
+            }
+        }
+
+        let additional_vertices = self.build_additional_scene_vertices(&additional_scene);
 
         let gpu = self
             .gpu
@@ -460,6 +482,20 @@ impl OffscreenRenderer {
                 ));
             }
             self.geometry_cache_key = Some(cache_key);
+        }
+
+        if additional_vertices.is_empty() {
+            gpu.additional_vertex_buffer = None;
+            gpu.additional_vertex_count = 0;
+        } else {
+            gpu.additional_vertex_count = additional_vertices.len() as u32;
+            gpu.additional_vertex_buffer = Some(render_state.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("offscreen-additional-vertex-buffer"),
+                    contents: bytemuck::cast_slice(&additional_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
         }
 
         let uniforms = Uniforms { view_proj };
@@ -513,6 +549,12 @@ impl OffscreenRenderer {
             if let Some(vertex_buffer) = &gpu.vertex_buffer {
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.draw(0..gpu.vertex_count, 0..1);
+            }
+
+            if let Some(vertex_buffer) = &gpu.additional_vertex_buffer {
+                pass.set_pipeline(&gpu.additional_pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.draw(0..gpu.additional_vertex_count, 0..1);
             }
         }
 
@@ -598,47 +640,73 @@ impl OffscreenRenderer {
     fn build_geometry_cache_key(
         &self,
         molecule: Option<&Molecule>,
-        selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> GeometryCacheKey {
-        let mut hasher = DefaultHasher::new();
-        selected_atoms.hash(&mut hasher);
-
         GeometryCacheKey {
             molecule_ptr: molecule
                 .map(|mol| mol as *const Molecule as usize)
                 .unwrap_or(0),
-            selected_len: selected_atoms.len(),
-            selected_hash: hasher.finish(),
             render_style: self.preference.render_style(),
             color_fn_ptr: color_fn as usize,
             mesh_resolution: self.preference.mesh_resolution(),
         }
     }
 
-    fn build_scene_vertices(
-        &self,
-        molecule: Option<&Molecule>,
-        selected_atoms: &[usize],
-        color_fn: ColorFn,
-    ) -> Vec<Vertex> {
+    fn build_scene_vertices(&self, molecule: Option<&Molecule>, color_fn: ColorFn) -> Vec<Vertex> {
         match self.preference.render_style() {
-            RenderStyle::BallStick => {
-                self.build_ballstick_vertices(molecule, selected_atoms, color_fn)
-            }
-            RenderStyle::BallOnly => {
-                self.build_ballstick_vertices(molecule, selected_atoms, color_fn)
-            }
-            RenderStyle::Wireframe => {
-                self.build_wireframe_vertices(molecule, selected_atoms, color_fn)
+            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, color_fn),
+            RenderStyle::BallOnly => self.build_ballstick_vertices(molecule, color_fn),
+            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, color_fn),
+        }
+    }
+
+    fn build_additional_scene_vertices(&self, scene: &Scene) -> Vec<Vertex> {
+        let max_vertices = MAX_RENDER_VERTICES;
+        let mut vertices = Vec::new();
+
+        for entity in &scene.entities {
+            let Some(mesh) = scene.meshes.get(entity.mesh) else {
+                continue;
+            };
+
+            let scale =
+                entity
+                    .scale_partial
+                    .unwrap_or(Vec3::new(entity.scale, entity.scale, entity.scale));
+            let color = [entity.color.0, entity.color.1, entity.color.2];
+
+            for tri in mesh.indices.chunks_exact(3) {
+                if vertices.len().saturating_add(3) > max_vertices {
+                    return vertices;
+                }
+
+                for &idx in tri {
+                    let Some(src) = mesh.vertices.get(idx) else {
+                        return vertices;
+                    };
+
+                    let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
+                    let p_scaled = Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z) / 3.0;
+                    let p_world = entity.orientation.rotate_vec(p_scaled) + entity.position;
+
+                    let n = src.normal;
+                    let n_world = entity.orientation.rotate_vec(n).to_normalized();
+
+                    vertices.push(Vertex {
+                        position: [p_world.x, p_world.y, p_world.z],
+                        normal: [n_world.x, n_world.y, n_world.z],
+                        color,
+                    });
+                }
             }
         }
+
+        vertices
     }
 
     fn build_ballstick_vertices(
         &self,
         molecule: Option<&Molecule>,
-        selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
         let render_style = self.preference.render_style();
@@ -684,8 +752,6 @@ impl OffscreenRenderer {
         };
 
         if let Some(mol) = molecule {
-            let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
-
             if include_bonds {
                 'bonds: for bond in &mol.bonds {
                     let a = mol.atoms[bond.atom_a].position;
@@ -740,16 +806,10 @@ impl OffscreenRenderer {
                 }
             }
 
-            'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
+            'atoms: for (_idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
-                let selected_this = selected.contains(&idx);
-                let quality_scale = match quality {
-                    BallstickQuality::High => 1.0,
-                    BallstickQuality::Medium => 0.85,
-                    BallstickQuality::Low => 0.70,
-                };
-                let radius = ball_stick_radius(&atom.element, selected_this) * quality_scale;
-                let color_tuple = color_fn(atom, selected_this);
+                let radius = ball_stick_radius(&atom.element, false);
+                let color_tuple = color_fn(atom, false);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
                 if !append_mesh_triangles(
@@ -891,7 +951,6 @@ impl OffscreenRenderer {
     fn build_wireframe_vertices(
         &self,
         molecule: Option<&Molecule>,
-        selected_atoms: &[usize],
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
         let max_vertices = MAX_RENDER_VERTICES;
@@ -911,8 +970,6 @@ impl OffscreenRenderer {
         };
 
         if let Some(mol) = molecule {
-            let selected: HashSet<usize> = selected_atoms.iter().copied().collect();
-
             'bonds: for bond in &mol.bonds {
                 let a = mol.atoms[bond.atom_a].position;
                 let b = mol.atoms[bond.atom_b].position;
@@ -944,11 +1001,10 @@ impl OffscreenRenderer {
                 }
             }
 
-            'atoms: for (idx, atom) in mol.atoms.iter().enumerate() {
+            'atoms: for (_idx, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
-                let selected_this = selected.contains(&idx);
-                let span = if selected_this { 0.04 } else { 0.02 };
-                let color_tuple = color_fn(atom, selected_this);
+                let span = 0.02;
+                let color_tuple = color_fn(atom, false);
                 let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
                 if !append_line(
@@ -1119,62 +1175,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         push_constant_ranges: &[],
     });
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: std::mem::size_of::<[f32; 3]>() as u64,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
-                        shader_location: 2,
-                    },
-                ],
-            }],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::LessEqual,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
+    let pipeline = create_triangle_pipeline(device, &layout, &shader, "offscreen-pipeline");
+    let additional_pipeline =
+        create_triangle_pipeline(device, &layout, &shader, "offscreen-additional-pipeline");
 
     let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-wire-shader"),
@@ -1272,12 +1275,79 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     GpuResources {
         pipeline,
+        additional_pipeline,
         wire_pipeline,
         uniform_buffer,
         uniform_bind_group,
         vertex_buffer: None,
         vertex_count: 0,
+        additional_vertex_buffer: None,
+        additional_vertex_count: 0,
     }
+}
+
+fn create_triangle_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: std::mem::size_of::<[f32; 3]>() as u64,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
+                        shader_location: 2,
+                    },
+                ],
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24Plus,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
 }
 
 fn bond_line_offsets(order: usize) -> Vec<f32> {

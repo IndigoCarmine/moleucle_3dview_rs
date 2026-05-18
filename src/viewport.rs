@@ -1,9 +1,11 @@
+use crate::additional_render::{SelectedAtomRender, SelectedAtomRenderState};
+
+use crate::render_state::{
+    get_state_clone_by_type, new_shared_states, set_state_by_type, SharedRenderStates,
+};
 use crate::{
     camera, offscreen_renderer::LodSettings, Camera, CameraController, Molecule, MoleculeViewer,
     OffscreenRenderer, RenderStyle,
-};
-use crate::render_state::{
-    new_shared_states, get_state_clone_by_type, set_state_by_type, SharedRenderStates,
 };
 use eframe::egui::{self, PointerButton, Sense};
 
@@ -18,11 +20,13 @@ impl InteractiveMoleculeViewport {
     pub fn new() -> Self {
         let viewer = MoleculeViewer::new();
         let shared_states = new_shared_states();
+        let mut offscreen = OffscreenRenderer::new();
+        offscreen.add_additional_render(Box::new(SelectedAtomRender::new()));
 
         Self {
             viewer,
             controller: CameraController::<camera::OrbitalCamera>::new(),
-            offscreen: OffscreenRenderer::new(),
+            offscreen: offscreen,
             shared_states,
         }
     }
@@ -37,7 +41,9 @@ impl InteractiveMoleculeViewport {
     }
 
     pub fn selected_atoms(&self) -> Vec<usize> {
-        get_state_clone_by_type::<Vec<usize>>(&self.shared_states).unwrap_or_default()
+        get_state_clone_by_type::<SelectedAtomRenderState>(&self.shared_states)
+            .map(|state| state.selected_atoms)
+            .unwrap_or_default()
     }
 
     pub fn render_style(&self) -> RenderStyle {
@@ -90,14 +96,13 @@ impl InteractiveMoleculeViewport {
         self.offscreen
             .ensure_resources(render_state, width, height)?;
 
-        let selected: Vec<usize> = get_state_clone_by_type::<Vec<usize>>(&self.shared_states).unwrap_or_default();
         let view_proj = self.controller.camera.view_projection().data;
         self.offscreen.render_frame(
             render_state,
             self.viewer.molecule.as_ref(),
-            selected.as_slice(),
             view_proj,
             self.viewer.color_fn,
+            Some(self.shared_states.clone()),
         )?;
 
         let texture_id = self
@@ -162,11 +167,16 @@ impl InteractiveMoleculeViewport {
                 if let Some(crate::viewer::ViewerEvent::AtomClicked(i)) =
                     self.viewer.pick(ray_origin, ray_dir)
                 {
-                    let mut selected: Vec<usize> = get_state_clone_by_type::<Vec<usize>>(&self.shared_states).unwrap_or_default();
-                    if let Some(pos) = selected.iter().position(|&index| index == i) {
-                        selected.remove(pos);
+                    let mut selected: SelectedAtomRenderState =
+                        get_state_clone_by_type::<SelectedAtomRenderState>(&self.shared_states)
+                            .unwrap_or_else(|| SelectedAtomRenderState {
+                                selected_atoms: Vec::new(),
+                                color: [1.0, 0.0, 0.0],
+                            });
+                    if let Some(_) = selected.selected_atoms.iter().position(|&index| index == i) {
+                        selected.remove_atom(i);
                     } else {
-                        selected.push(i);
+                        selected.toggle_atom(i);
                     }
                     set_state_by_type(&self.shared_states, selected);
                 }

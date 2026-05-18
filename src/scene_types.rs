@@ -171,5 +171,20 @@ impl SceneCamera {
 pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub entities: Vec<Entity>,
-    pub camera: SceneCamera,
+}
+
+impl Scene {
+    pub fn to_vertices(&self) -> Vec<Vertex> {
+        let mut vertices = Vec::new();
+        for entity in &self.entities {
+            let mesh = &self.meshes[entity.mesh];
+            for idx in &mesh.indices {
+                let v = &mesh.vertices[*idx];
+                let pos = Vec3::from(v.position) * entity.scale;
+                let final_pos = pos + entity.position;
+                vertices.push(Vertex::new(final_pos.to_arr(), v.normal));
+            }
+        }
+        vertices
+    }
 }

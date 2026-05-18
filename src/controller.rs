@@ -1,6 +1,6 @@
 use crate::{
     camera::Camera,
-    scene_types::Scene,
+    scene_types::{Scene, SceneCamera},
     viewer::{MoleculeViewer, ViewerEvent},
 };
 use lin_alg::f32::Vec2;
@@ -67,7 +67,12 @@ impl<T: Camera + Default> CameraController<T> {
     /// - Shift + MMB: pan
     /// - Ctrl + MMB: dolly
     /// - LMB: pick
-    pub fn handle_event(&mut self, event: &WindowEvent, _scene: &Scene, viewer: &MoleculeViewer) -> (Option<ViewerEvent>, EngineUpdates) {
+    pub fn handle_event(
+        &mut self,
+        event: &WindowEvent,
+        _scene: &Scene,
+        viewer: &MoleculeViewer,
+    ) -> (Option<ViewerEvent>, EngineUpdates) {
         let mut updates = EngineUpdates::default();
         let mut picked_event = None;
 
@@ -152,21 +157,21 @@ impl<T: Camera + Default> CameraController<T> {
     }
 
     /// Synchronize camera state into rendering scene.
-    pub fn update_scene_camera(&self, scene: &mut Scene) {
-                let pos = self.camera.position();
+    pub fn update_camera(&self, camera: &mut SceneCamera) {
+        let pos = self.camera.position();
 
-        scene.camera.position = lin_alg::f32::Vec3::new(pos.x, pos.y, pos.z);
+        camera.position = lin_alg::f32::Vec3::new(pos.x, pos.y, pos.z);
         let rot = self.camera.camera_rotation();
-        scene.camera.orientation = lin_alg::f32::Quaternion::new(rot.w, rot.x, rot.y, rot.z);
+        camera.orientation = lin_alg::f32::Quaternion::new(rot.w, rot.x, rot.y, rot.z);
 
-        scene.camera.fov_y = self.camera.fov_y();
-        scene.camera.near = self.camera.near();
-        scene.camera.far = self.camera.far();
+        camera.fov_y = self.camera.fov_y();
+        camera.near = self.camera.near();
+        camera.far = self.camera.far();
         // Aspect
-        scene.camera.aspect = self.width / self.height;
+        camera.aspect = self.width / self.height;
 
         // Update the project matrix in the graphics engine
-        scene.camera.update_proj_mat();
+        camera.update_proj_mat();
     }
 
     pub fn ray_from_last_mouse(&self) -> (lin_alg::f32::Vec3, lin_alg::f32::Vec3) {

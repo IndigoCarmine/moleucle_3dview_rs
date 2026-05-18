@@ -1,3 +1,4 @@
+use crate::atom_radii::vdw_radius;
 use crate::molecule::Molecule;
 use crate::render_state::{get_state_clone_by_type, SharedRenderStates};
 use crate::scene_types::{Entity, Mesh, Scene};
@@ -25,6 +26,16 @@ pub trait AdditionalRender: Send {
         scene.entities.push(entity);
     }
 
+    fn add_sphere_sameas_carbon(
+        &self,
+        scene: &mut Scene,
+        position: Vec3,
+        relative_radius: f32,
+        color: (f32, f32, f32),
+    ) {
+        let radius = vdw_radius("C") * relative_radius; // Carbon van der Waals radius for demo
+        self.add_sphere(scene, position, radius, color);
+    }
     fn add_cylinder(
         &self,
         scene: &mut Scene,
@@ -49,59 +60,54 @@ pub trait AdditionalRender: Send {
     }
 }
 #[derive(Clone)]
-pub struct SelectedAtomRender {
+pub struct SelectedAtomRenderState {
     pub selected_atoms: Vec<usize>,
     pub color: [f32; 3],
 }
+pub struct SelectedAtomRender {}
 
 impl SelectedAtomRender {
     pub fn new() -> Self {
-        Self {
-            selected_atoms: Vec::new(),
-            color: [1.0, 0.0, 0.0],
-        }
-    }
-
-    pub fn selected_atoms(&self) -> &[usize] {
-        &self.selected_atoms
-    }
-
-    pub fn set_selected_atoms(&mut self, atom_indices: Vec<usize>) {
-        self.selected_atoms = atom_indices;
-    }
-
-    pub fn clear_selected_atoms(&mut self) {
-        self.selected_atoms.clear();
+        Self {}
     }
 }
 
 impl AdditionalRender for SelectedAtomRender {
     fn update_scene(&self, scene: &mut Scene, molecule: &Molecule, states: &SharedRenderStates) {
         // Use type-keyed state to lookup selected atoms. If not set, fall back to internal list.
-        let source: Vec<usize> = get_state_clone_by_type::<Vec<usize>>(states)
-            .unwrap_or_else(|| self.selected_atoms.clone());
+        let source: SelectedAtomRenderState =
+            get_state_clone_by_type::<SelectedAtomRenderState>(states).unwrap_or_else(|| {
+                SelectedAtomRenderState {
+                    selected_atoms: Vec::new(),
+                    color: [1.0, 0.0, 0.0], // Default red color
+                }
+            });
+        println!(
+            "SelectedAtomRender: selected_atoms={:?}",
+            source.selected_atoms
+        );
 
-        if source.is_empty() {
-            return;
-        }
-
-        let radius = 0.6;
-        let color = (self.color[0], self.color[1], self.color[2]);
-        scene.entities.reserve(source.len());
-
-        for atom_idx in source.iter() {
+        let color = (source.color[0], source.color[1], source.color[2]);
+        scene.entities.reserve(source.selected_atoms.len());
+        println!("Rendering {} selected atoms", source.selected_atoms.len());
+        for atom_idx in &source.selected_atoms {
             if let Some(atom) = molecule.atoms.get(*atom_idx) {
-                self.add_sphere(scene, atom.position, radius, color);
+                self.add_sphere_sameas_carbon(scene, atom.position, 1.0, color);
             }
         }
     }
 }
 
-impl SelectedAtomRender {
-    pub fn add_atom(&mut self, atom_idx: usize) {
-        if !self.selected_atoms.contains(&atom_idx) {
-            self.selected_atoms.push(atom_idx);
+impl SelectedAtomRenderState {
+    pub fn new(selected_atoms: Vec<usize>, color: [f32; 3]) -> Self {
+        Self {
+            selected_atoms,
+            color,
         }
+    }
+
+    pub fn set_color(&mut self, color: [f32; 3]) {
+        self.color = color;
     }
 
     pub fn remove_atom(&mut self, atom_idx: usize) {
@@ -118,14 +124,14 @@ impl SelectedAtomRender {
         }
     }
 }
-
-pub struct DebugRender {
+#[derive(Clone)]
+pub struct DebugRenderState {
     pub ray: (Vec3, Vec3),
     pub ray_length: f32,
     pub ray_color: (f32, f32, f32),
 }
 
-impl DebugRender {
+impl DebugRenderState {
     pub fn new(ray: (Vec3, Vec3)) -> Self {
         Self {
             ray,
@@ -161,17 +167,25 @@ impl DebugRender {
     }
 }
 
+pub struct DebugRender {}
+
 impl AdditionalRender for DebugRender {
     fn update_scene(&self, scene: &mut Scene, _molecule: &Molecule, _states: &SharedRenderStates) {
+        let state = get_state_clone_by_type::<DebugRenderState>(_states).unwrap_or_else(|| {
+            DebugRenderState::new((
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0), // Default ray along +X axis
+            ))
+        });
         // Draw debug ray as a thin cylinder
-        let (origin, direction) = self.ray;
+        let (origin, direction) = state.ray;
 
         // Normalize direction
         let normalized_dir = direction.to_normalized();
         let ray_radius = 0.05; // Thin cylinder for visualization
 
         // Calculate midpoint of the ray
-        let ray_end = origin + normalized_dir * self.ray_length;
+        let ray_end = origin + normalized_dir * state.ray_length;
         let midpoint = (origin + ray_end) * 0.5;
 
         // Create cylinder mesh
@@ -184,17 +198,11 @@ impl AdditionalRender for DebugRender {
         let orientation = Quaternion::from_unit_vecs(up, normalized_dir);
 
         // Create entity with proper scaling
-        let mut ray_entity = Entity::new(ray_idx, midpoint, orientation, 1.0, self.ray_color, 0.1);
+        let mut ray_entity = Entity::new(ray_idx, midpoint, orientation, 1.0, state.ray_color, 0.1);
 
         // Apply scale_partial to set cylinder dimensions
         // X and Z are radii, Y is length
-        ray_entity.scale_partial = Some(Vec3::new(ray_radius, self.ray_length, ray_radius));
+        ray_entity.scale_partial = Some(Vec3::new(ray_radius, state.ray_length, ray_radius));
         scene.entities.push(ray_entity);
-    }
-}
-
-impl DebugRender {
-    pub fn update_ray(&mut self, ray: (Vec3, Vec3)) {
-        self.ray = ray;
     }
 }
