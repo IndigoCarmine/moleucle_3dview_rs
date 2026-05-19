@@ -46,6 +46,12 @@ impl InteractiveMoleculeViewport {
             .map(|state| state.selected_atoms)
             .unwrap_or_default()
     }
+    pub fn focus_on_molecule_center(&mut self) {
+        if let Some(molecule) = self.viewer.molecule.as_ref() {
+            self.controller.camera.center = molecule.center();
+            self.controller.camera.radius = molecule.radius() * 2.0;
+        }
+    }
 
     pub fn render_style(&self) -> RenderStyle {
         self.offscreen.render_style()

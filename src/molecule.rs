@@ -122,6 +122,18 @@ impl Molecule {
         sum / self.atoms.len() as f32
     }
 
+    pub fn radius(&self) -> f32 {
+        let center = self.center();
+        // return max distance from center to any atom + its van der Waals radius
+        self.atoms
+            .iter()
+            .map(|atom| {
+                let dist = (atom.position - center).magnitude();
+                dist + vdw_radius(&atom.element)
+            })
+            .fold(0.0, f32::max)
+    }
+
     pub fn from_mol2(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut atoms = Vec::new();

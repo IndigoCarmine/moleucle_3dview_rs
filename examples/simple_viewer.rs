@@ -53,6 +53,8 @@ impl SimpleViewerApp {
         let startup_error = match load_default_molecule() {
             Ok(molecule) => {
                 viewport.set_molecule(molecule);
+
+                viewport.focus_on_molecule_center();
                 None
             }
             Err(err) => Some(err),
