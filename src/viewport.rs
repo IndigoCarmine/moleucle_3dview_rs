@@ -53,6 +53,10 @@ impl InteractiveMoleculeViewport {
         }
     }
 
+    pub fn set_state_by_type<T: 'static + Send + Sync>(&mut self, state: T) {
+        set_state_by_type(&self.shared_states, state);
+    }
+
     pub fn render_style(&self) -> RenderStyle {
         self.offscreen.render_style()
     }
