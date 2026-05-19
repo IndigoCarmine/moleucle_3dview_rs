@@ -1,8 +1,8 @@
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
+use crate::frame_state::RenderFrameState;
 use crate::molecule::{Atom, Molecule};
 use crate::scene_types::{Entity, Mesh, Scene};
 use crate::AdditionalRender;
-use crate::render_state::SharedRenderStates;
 // Viewer no longer owns shared state; state is passed in by the caller (viewport or user).
 use lin_alg::f32::{Quaternion, Vec3};
 
@@ -173,7 +173,7 @@ impl MoleculeViewer {
     /// Updates the graphics scene based on the current molecule data.
     ///
     /// `states` is a map of per-renderer states supplied by the caller (e.g., the viewport).
-    pub fn update_scene(&mut self, scene: &mut Scene, states: &SharedRenderStates) {
+    pub fn update_scene(&mut self, scene: &mut Scene, frame: &RenderFrameState<'_>) {
         if !self.dirty {
             return;
         }
@@ -304,7 +304,7 @@ impl MoleculeViewer {
             scene.entities.push(z_axis);
 
             for render in &self.additional_render {
-                render.update_scene(scene, mol, states);
+                render.update_scene(scene, frame);
             }
         }
     }

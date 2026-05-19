@@ -1,5 +1,6 @@
 use crate::additional_render::AdditionalRender;
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
+use crate::frame_state::RenderFrameState;
 use crate::render_state::SharedRenderStates;
 use crate::scene_types::Scene;
 use crate::viewer::ColorFn;
@@ -48,6 +49,52 @@ pub struct OffscreenRendererPreference {
     mesh_resolution: usize,
     lod_settings: LodSettings,
     render_style: RenderStyle,
+}
+
+impl Default for OffscreenRendererPreference {
+    fn default() -> Self {
+        Self {
+            mesh_resolution: DEFAULT_MESH_RESOLUTION,
+            lod_settings: LodSettings::default(),
+            render_style: RenderStyle::BallStick,
+        }
+    }
+}
+
+impl OffscreenRendererPreference {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_mesh_resolution(mesh_resolution: usize) -> Self {
+        let mut preference = Self::default();
+        preference.set_mesh_resolution(mesh_resolution);
+        preference
+    }
+
+    pub fn mesh_resolution(&self) -> usize {
+        self.mesh_resolution
+    }
+
+    pub fn lod_settings(&self) -> LodSettings {
+        self.lod_settings
+    }
+
+    pub fn render_style(&self) -> RenderStyle {
+        self.render_style
+    }
+
+    pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
+        self.mesh_resolution = mesh_resolution.max(3);
+    }
+
+    pub fn set_lod_settings(&mut self, lod_settings: LodSettings) {
+        self.lod_settings = lod_settings;
+    }
+
+    pub fn set_render_style(&mut self, render_style: RenderStyle) {
+        self.render_style = render_style;
+    }
 }
 
 struct LodDistanceWorker {
@@ -127,18 +174,18 @@ impl LodDistanceWorker {
         let _ = self.distance_tx.send(distance);
     }
 
+    fn set_settings(&self, settings: LodSettings) {
+        if let Ok(mut guard) = self.settings.lock() {
+            *guard = settings;
+        }
+    }
+
     fn poll_resolution(&self) -> Option<usize> {
         let mut latest = None;
         while let Ok(resolution) = self.resolution_rx.try_recv() {
             latest = Some(resolution);
         }
         latest
-    }
-
-    fn set_settings(&self, settings: LodSettings) {
-        if let Ok(mut guard) = self.settings.lock() {
-            *guard = settings;
-        }
     }
 }
 
@@ -148,52 +195,6 @@ impl Drop for LodDistanceWorker {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-    }
-}
-
-impl Default for OffscreenRendererPreference {
-    fn default() -> Self {
-        Self {
-            mesh_resolution: DEFAULT_MESH_RESOLUTION,
-            lod_settings: LodSettings::default(),
-            render_style: RenderStyle::BallStick,
-        }
-    }
-}
-
-impl OffscreenRendererPreference {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_mesh_resolution(mesh_resolution: usize) -> Self {
-        let mut preference = Self::default();
-        preference.set_mesh_resolution(mesh_resolution);
-        preference
-    }
-
-    pub fn mesh_resolution(&self) -> usize {
-        self.mesh_resolution
-    }
-
-    pub fn lod_settings(&self) -> LodSettings {
-        self.lod_settings
-    }
-
-    pub fn render_style(&self) -> RenderStyle {
-        self.render_style
-    }
-
-    pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
-        self.mesh_resolution = mesh_resolution.max(3);
-    }
-
-    pub fn set_lod_settings(&mut self, lod_settings: LodSettings) {
-        self.lod_settings = lod_settings;
-    }
-
-    pub fn set_render_style(&mut self, render_style: RenderStyle) {
-        self.render_style = render_style;
     }
 }
 
@@ -406,13 +407,10 @@ impl OffscreenRenderer {
         self.additional_renders.push(render);
     }
 
-    pub fn render_frame(
+    pub fn render_frame_with_state(
         &mut self,
         render_state: &egui_wgpu::RenderState,
-        molecule: Option<&Molecule>,
-        view_proj: [f32; 16],
-        color_fn: ColorFn,
-        additionalstate: Option<SharedRenderStates>,
+        frame: &RenderFrameState<'_>,
     ) -> Result<(), String> {
         self.apply_pending_lod_resolution();
 
@@ -428,9 +426,9 @@ impl OffscreenRenderer {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let cache_key = self.build_geometry_cache_key(molecule, color_fn);
+        let cache_key = self.build_geometry_cache_key(frame.molecule, frame.color_fn);
         let rebuilt_vertices = if self.geometry_cache_key != Some(cache_key) {
-            Some(self.build_scene_vertices(molecule, color_fn))
+            Some(self.build_scene_vertices(frame.molecule, frame.color_fn))
         } else {
             None
         };
@@ -438,14 +436,8 @@ impl OffscreenRenderer {
             meshes: Vec::new(),
             entities: Vec::new(),
         };
-        if let Some(additionalstate) = additionalstate {
-            for additional in &self.additional_renders {
-                additional.update_scene(
-                    &mut additional_scene,
-                    molecule.unwrap_or(&Molecule::default()),
-                    &additionalstate,
-                );
-            }
+        for additional in &self.additional_renders {
+            additional.update_scene(&mut additional_scene, frame);
         }
 
         let additional_vertices = self.build_additional_scene_vertices(&additional_scene);
@@ -498,7 +490,9 @@ impl OffscreenRenderer {
             ));
         }
 
-        let uniforms = Uniforms { view_proj };
+        let uniforms = Uniforms {
+            view_proj: frame.view_proj,
+        };
         render_state
             .queue
             .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -558,8 +552,20 @@ impl OffscreenRenderer {
             }
         }
 
-        render_state.queue.submit(Some(encoder.finish()));
+        render_state.queue.submit(std::iter::once(encoder.finish()));
         Ok(())
+    }
+
+    pub fn render_frame(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        molecule: Option<&Molecule>,
+        view_proj: [f32; 16],
+        color_fn: ColorFn,
+        additionalstate: Option<SharedRenderStates>,
+    ) -> Result<(), String> {
+        let frame = RenderFrameState::new(molecule, view_proj, color_fn, additionalstate.as_ref());
+        self.render_frame_with_state(render_state, &frame)
     }
 
     pub fn submit_lod_distance(&self, distance: f32) {
@@ -686,7 +692,7 @@ impl OffscreenRenderer {
                     };
 
                     let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
-                    let p_scaled = Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z) / 3.0;
+                    let p_scaled = Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z);
                     let p_world = entity.orientation.rotate_vec(p_scaled) + entity.position;
 
                     let n = src.normal;

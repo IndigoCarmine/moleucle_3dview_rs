@@ -1,4 +1,5 @@
 use crate::additional_render::{SelectedAtomRender, SelectedAtomRenderState};
+use crate::frame_state::RenderFrameState;
 
 use crate::render_state::{
     get_state_clone_by_type, new_shared_states, set_state_by_type, SharedRenderStates,
@@ -33,7 +34,7 @@ impl InteractiveMoleculeViewport {
 
     /// Expose a way to add an AdditionalRender to the internal viewer from callers.
     pub fn add_additional_render_box(&mut self, render: Box<dyn crate::AdditionalRender>) {
-        self.viewer.add_additional_render_box(render);
+        self.offscreen.add_additional_render(render);
     }
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
@@ -97,13 +98,15 @@ impl InteractiveMoleculeViewport {
             .ensure_resources(render_state, width, height)?;
 
         let view_proj = self.controller.camera.view_projection().data;
-        self.offscreen.render_frame(
-            render_state,
+        let frame = RenderFrameState::new(
             self.viewer.molecule.as_ref(),
             view_proj,
             self.viewer.color_fn,
-            Some(self.shared_states.clone()),
-        )?;
+            Some(&self.shared_states),
+        );
+
+        self.offscreen
+            .render_frame_with_state(render_state, &frame)?;
 
         let texture_id = self
             .offscreen

@@ -27,26 +27,28 @@
 //! ```
 
 pub mod additional_render;
-pub mod render_state;
 pub mod atom_radii;
 pub mod camera;
 pub mod controller;
+pub mod frame_state;
 pub mod molecule;
 pub mod offscreen_renderer;
+pub mod render_state;
 pub mod scene_types;
 pub mod viewer;
 pub mod viewport;
 
-pub use additional_render::{AdditionalRender, SelectedAtomRender, DebugRender};
-pub use render_state::{
-	new_shared_states, SharedRenderStates, set_state_by_type, get_state_clone_by_type,
-	with_state_mut_by_type,
-};
+pub use additional_render::{AdditionalRender, DebugRender, SelectedAtomRender};
 pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
 pub use camera::{Camera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
-pub use molecule::{Molecule, Atom, AtomRecord};
+pub use frame_state::RenderFrameState;
+pub use molecule::{Atom, AtomRecord, Molecule};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};
+pub use render_state::{
+    get_state_clone_by_type, new_shared_states, set_state_by_type, with_state_mut_by_type,
+    SharedRenderStates,
+};
 pub use scene_types::{Entity, Mesh, Scene};
-pub use viewer::{MoleculeViewer, ColorFn, default_color_fn};
+pub use viewer::{default_color_fn, ColorFn, MoleculeViewer};
 pub use viewport::InteractiveMoleculeViewport;

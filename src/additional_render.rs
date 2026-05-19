@@ -1,6 +1,6 @@
 use crate::atom_radii::vdw_radius;
-use crate::molecule::Molecule;
-use crate::render_state::{get_state_clone_by_type, SharedRenderStates};
+use crate::frame_state::RenderFrameState;
+use crate::render_state::get_state_clone_by_type;
 use crate::scene_types::{Entity, Mesh, Scene};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;
@@ -8,10 +8,10 @@ use lin_alg::f32::Vec3;
 // for adding rendering works to MoleculeViewer.
 pub trait AdditionalRender: Send {
     /// Update the given `scene` using `molecule` and the shared `states` map.
-    fn update_scene(&self, scene: &mut Scene, molecule: &Molecule, states: &SharedRenderStates);
+    fn update_scene(&self, scene: &mut Scene, frame: &RenderFrameState<'_>);
 
     fn add_sphere(&self, scene: &mut Scene, position: Vec3, radius: f32, color: (f32, f32, f32)) {
-        let sphere_mesh = Mesh::new_sphere(1.0, 16);
+        let sphere_mesh = Mesh::new_sphere_uv(1.0, 5, 5);
         let mesh_idx = scene.meshes.len();
         scene.meshes.push(sphere_mesh);
 
@@ -73,7 +73,15 @@ impl SelectedAtomRender {
 }
 
 impl AdditionalRender for SelectedAtomRender {
-    fn update_scene(&self, scene: &mut Scene, molecule: &Molecule, states: &SharedRenderStates) {
+    fn update_scene(&self, scene: &mut Scene, frame: &RenderFrameState<'_>) {
+        let Some(molecule) = frame.molecule else {
+            return;
+        };
+
+        let Some(states) = frame.shared_states else {
+            return;
+        };
+
         // Use type-keyed state to lookup selected atoms. If not set, fall back to internal list.
         let source: SelectedAtomRenderState =
             get_state_clone_by_type::<SelectedAtomRenderState>(states).unwrap_or_else(|| {
@@ -92,7 +100,12 @@ impl AdditionalRender for SelectedAtomRender {
         println!("Rendering {} selected atoms", source.selected_atoms.len());
         for atom_idx in &source.selected_atoms {
             if let Some(atom) = molecule.atoms.get(*atom_idx) {
-                self.add_sphere_sameas_carbon(scene, atom.position, 1.0, color);
+                self.add_sphere(
+                    scene,
+                    atom.position,
+                    vdw_radius(&atom.element) * 0.4, // Render selected atoms at half VDW radius
+                    color,
+                );
             }
         }
     }
@@ -170,8 +183,12 @@ impl DebugRenderState {
 pub struct DebugRender {}
 
 impl AdditionalRender for DebugRender {
-    fn update_scene(&self, scene: &mut Scene, _molecule: &Molecule, _states: &SharedRenderStates) {
-        let state = get_state_clone_by_type::<DebugRenderState>(_states).unwrap_or_else(|| {
+    fn update_scene(&self, scene: &mut Scene, frame: &RenderFrameState<'_>) {
+        let Some(states) = frame.shared_states else {
+            return;
+        };
+
+        let state = get_state_clone_by_type::<DebugRenderState>(states).unwrap_or_else(|| {
             DebugRenderState::new((
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(1.0, 0.0, 0.0), // Default ray along +X axis

@@ -1,5 +1,6 @@
 use eframe::egui;
 use egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
+use moleucle_3dview_rs::frame_state::RenderFrameState;
 use moleucle_3dview_rs::render_state::{get_state_clone_by_type, set_state_by_type};
 use moleucle_3dview_rs::AdditionalRender;
 use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, RenderStyle};
@@ -21,12 +22,11 @@ impl ExampleStateRender {
 }
 
 impl AdditionalRender for ExampleStateRender {
-    fn update_scene(
-        &self,
-        scene: &mut moleucle_3dview_rs::Scene,
-        _molecule: &moleucle_3dview_rs::Molecule,
-        states: &moleucle_3dview_rs::SharedRenderStates,
-    ) {
+    fn update_scene(&self, scene: &mut moleucle_3dview_rs::Scene, frame: &RenderFrameState<'_>) {
+        let Some(states) = frame.shared_states else {
+            return;
+        };
+
         // read a counter from state, default 0
         let count: usize = get_state_clone_by_type::<usize>(states).unwrap_or(0usize);
 
@@ -38,20 +38,7 @@ impl AdditionalRender for ExampleStateRender {
         };
 
         // place sphere at top-left of scene for demo
-        let pos = lin_alg::f32::Vec3::new(0.0, 0.0, 0.0);
-        let sphere_mesh = moleucle_3dview_rs::Mesh::new_sphere(1.0, 8);
-        let mesh_idx = scene.meshes.len();
-        scene.meshes.push(sphere_mesh);
-        let entity = moleucle_3dview_rs::Entity::new(
-            mesh_idx,
-            pos,
-            lin_alg::f32::Quaternion::new_identity(),
-            0.2,
-            color,
-            0.2,
-        );
-        scene.entities.push(entity);
-
+        self.add_sphere_sameas_carbon(scene, lin_alg::f32::Vec3::new(0.0, 0.0, 0.0), 0.5, color);
         // increment and store counter for next frame
         set_state_by_type(states, count + 1usize);
     }
