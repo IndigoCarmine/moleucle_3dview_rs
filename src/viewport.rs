@@ -77,7 +77,6 @@ impl InteractiveMoleculeViewport {
 
     pub fn show(
         &mut self,
-        ctx: &egui::Context,
         ui: &mut egui::Ui,
         render_state: &egui_wgpu::RenderState,
     ) -> Result<(), String> {
@@ -121,6 +120,7 @@ impl InteractiveMoleculeViewport {
             .sense(Sense::click_and_drag()),
         );
 
+        let ctx = ui.ctx();
         self.handle_interaction(ctx, &response);
         Ok(())
     }

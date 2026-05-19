@@ -531,6 +531,7 @@ impl OffscreenRenderer {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             let pipeline = match self.preference.render_style() {
@@ -1177,8 +1178,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("offscreen-layout"),
-        bind_group_layouts: &[&uniform_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&uniform_layout)],
+        immediate_size: 0,
     });
 
     let pipeline = create_triangle_pipeline(device, &layout, &shader, "offscreen-pipeline");
@@ -1269,13 +1270,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::LessEqual,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     });
 
@@ -1345,13 +1346,13 @@ fn create_triangle_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::LessEqual,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }

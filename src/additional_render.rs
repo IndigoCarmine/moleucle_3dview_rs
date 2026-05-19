@@ -90,14 +90,9 @@ impl AdditionalRender for SelectedAtomRender {
                     color: [1.0, 0.0, 0.0], // Default red color
                 }
             });
-        println!(
-            "SelectedAtomRender: selected_atoms={:?}",
-            source.selected_atoms
-        );
 
         let color = (source.color[0], source.color[1], source.color[2]);
         scene.entities.reserve(source.selected_atoms.len());
-        println!("Rendering {} selected atoms", source.selected_atoms.len());
         for atom_idx in &source.selected_atoms {
             if let Some(atom) = molecule.atoms.get(*atom_idx) {
                 self.add_sphere(

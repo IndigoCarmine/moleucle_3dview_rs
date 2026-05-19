@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui_wgpu::{wgpu, WgpuSetup, WgpuSetupCreateNew};
+// egui_wgpu::wgpu import removed (unused)
 use moleucle_3dview_rs::frame_state::RenderFrameState;
 use moleucle_3dview_rs::render_state::{get_state_clone_by_type, set_state_by_type};
 use moleucle_3dview_rs::AdditionalRender;
@@ -79,8 +79,8 @@ fn load_default_molecule() -> Result<Molecule, String> {
 }
 
 impl eframe::App for SimpleViewerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::TopBottomPanel::top("help").show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::top("help").show_inside(ui, |ui| {
             ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
             ui.label(format!(
                 "Selected atoms: {}",
@@ -144,14 +144,14 @@ impl eframe::App for SimpleViewerApp {
             }
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let Some(render_state) = &self.render_state else {
                 ui.heading("WGPU backend is unavailable");
                 ui.label("Start this example with the wgpu backend enabled in eframe.");
                 return;
             };
 
-            if let Err(err) = self.viewport.show(ctx, ui, render_state) {
+            if let Err(err) = self.viewport.show(ui, render_state) {
                 ui.colored_label(
                     egui::Color32::RED,
                     format!("Offscreen render failed: {err}"),
@@ -159,7 +159,7 @@ impl eframe::App for SimpleViewerApp {
             }
         });
 
-        ctx.request_repaint();
+        ui.ctx().request_repaint();
     }
 
     fn on_exit(&mut self) {
@@ -173,18 +173,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]),
-        wgpu_options: egui_wgpu::WgpuConfiguration {
-            wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
-                // Prefer Vulkan and fall back to DX12 when Vulkan runtime/driver is unavailable.
-                instance_descriptor: wgpu::InstanceDescriptor {
-                    backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12,
-                    ..Default::default()
-                },
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
+        wgpu_options: Default::default(),
         ..Default::default()
     };
 

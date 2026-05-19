@@ -51,7 +51,7 @@ pub fn with_state_mut_by_type<T: Any + Send + Sync>(
 }
 
 // Backwards-compatible string-keyed helpers. Keep for now but prefer the type-keyed variants above.
-pub fn set_state<T: Any + Send + Sync>(states: &SharedRenderStates, key: &str, value: T) {
+pub fn set_state<T: Any + Send + Sync>(states: &SharedRenderStates, key: &str, _value: T) {
     if let Ok(mut map) = states.lock() {
         map.insert(TypeId::of::<String>(), Box::new(key.to_string()));
         // Store the actual value under a composite key derived from the provided string by hashing the string
