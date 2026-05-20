@@ -1,15 +1,21 @@
 use eframe::egui;
+use moleucle_3dview_rs::additional_render::SelectedAtomRenderState;
 // egui_wgpu::wgpu import removed (unused)
 use moleucle_3dview_rs::frame_state::RenderFrameState;
 use moleucle_3dview_rs::render_state::{get_state_clone_by_type, set_state_by_type};
 use moleucle_3dview_rs::AdditionalRender;
-use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, RenderStyle};
+use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, RenderStyle, ViewPortEvent};
 use std::path::Path;
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 struct SimpleViewerApp {
     viewport: InteractiveMoleculeViewport,
     render_state: Option<egui_wgpu::RenderState>,
     startup_error: Option<String>,
+    hovered_atom: Rc<RefCell<usize>>,
+    selected_atoms: Rc<RefCell<Vec<usize>>>,
 }
 
 #[derive(Clone)]
@@ -45,8 +51,26 @@ impl AdditionalRender for ExampleStateRender {
 }
 
 impl SimpleViewerApp {
+    fn on_event(
+        selected_atoms: Rc<RefCell<Vec<usize>>>,
+        hovered_atom: Rc<RefCell<usize>>,
+        viewport: &mut InteractiveMoleculeViewport,
+        event: ViewPortEvent,
+    ) {
+        if let ViewPortEvent::clicked { atom } = event {
+            // toggle atom selection in state
+            selected_atoms.borrow_mut().push(atom);
+            viewport.set_state_by_type(SelectedAtomRenderState {
+                selected_atoms: selected_atoms.clone().borrow().clone(),
+                color: [1.0, 0.0, 0.0],
+            });
+        }
+        if let ViewPortEvent::hovered { atom } = event {
+            *hovered_atom.borrow_mut() = atom;
+        }
+    }
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut viewport = InteractiveMoleculeViewport::new();
+        let mut viewport = InteractiveMoleculeViewport::new(None);
         // register an example per-render state renderer
         let example = ExampleStateRender::new();
         viewport.add_additional_render_box(Box::new(example));
@@ -64,7 +88,25 @@ impl SimpleViewerApp {
             viewport,
             render_state: cc.wgpu_render_state.clone(),
             startup_error,
+            hovered_atom: Rc::new(RefCell::new(0)),
+            selected_atoms: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    fn register_event_handler(mut self) -> Self {
+        let selected_atoms = Rc::clone(&self.selected_atoms);
+        let hovered_atom = Rc::clone(&self.hovered_atom);
+
+        self.viewport
+            .register_event_handler(Box::new(move |viewport, event| {
+                SimpleViewerApp::on_event(
+                    Rc::clone(&selected_atoms),
+                    Rc::clone(&hovered_atom),
+                    viewport,
+                    event,
+                )
+            }));
+        self
     }
 }
 
@@ -145,6 +187,9 @@ impl eframe::App for SimpleViewerApp {
                 ));
             }
         });
+        egui::Panel::bottom("footer").show_inside(ui, |ui| {
+            ui.label("Hovered atom: ".to_string() + &self.hovered_atom.borrow().to_string())
+        });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let Some(render_state) = &self.render_state else {
@@ -160,8 +205,6 @@ impl eframe::App for SimpleViewerApp {
                 );
             }
         });
-
-        ui.ctx().request_repaint();
     }
 
     fn on_exit(&mut self) {
@@ -182,6 +225,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Molecule Viewer (Offscreen + egui)",
         options,
-        Box::new(|cc| Ok(Box::new(SimpleViewerApp::new(cc)))),
+        Box::new(|cc| {
+            let app = SimpleViewerApp::new(cc);
+            Ok(Box::new(app.register_event_handler()))
+        }),
     )
 }
