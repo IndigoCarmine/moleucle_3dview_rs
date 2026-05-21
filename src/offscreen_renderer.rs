@@ -49,6 +49,7 @@ pub struct OffscreenRendererPreference {
     mesh_resolution: usize,
     lod_settings: LodSettings,
     render_style: RenderStyle,
+    is_low_mode: bool,
 }
 
 impl Default for OffscreenRendererPreference {
@@ -57,6 +58,7 @@ impl Default for OffscreenRendererPreference {
             mesh_resolution: DEFAULT_MESH_RESOLUTION,
             lod_settings: LodSettings::default(),
             render_style: RenderStyle::BallStick,
+            is_low_mode: false,
         }
     }
 }
@@ -535,11 +537,14 @@ impl OffscreenRenderer {
             });
 
             let pipeline = match self.preference.render_style() {
+                RenderStyle::BallStick if self.preference.is_low_mode => &gpu.wire_pipeline,
                 RenderStyle::BallStick => &gpu.pipeline,
                 RenderStyle::BallOnly => &gpu.pipeline,
                 RenderStyle::Wireframe => &gpu.wire_pipeline,
             };
+
             pass.set_pipeline(pipeline);
+
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
             if let Some(vertex_buffer) = &gpu.vertex_buffer {
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
@@ -659,7 +664,11 @@ impl OffscreenRenderer {
         }
     }
 
-    fn build_scene_vertices(&self, molecule: Option<&Molecule>, color_fn: ColorFn) -> Vec<Vertex> {
+    fn build_scene_vertices(
+        &mut self,
+        molecule: Option<&Molecule>,
+        color_fn: ColorFn,
+    ) -> Vec<Vertex> {
         match self.preference.render_style() {
             RenderStyle::BallStick => self.build_ballstick_vertices(molecule, color_fn),
             RenderStyle::BallOnly => self.build_ballstick_vertices(molecule, color_fn),
@@ -712,7 +721,7 @@ impl OffscreenRenderer {
     }
 
     fn build_ballstick_vertices(
-        &self,
+        &mut self,
         molecule: Option<&Molecule>,
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
@@ -726,6 +735,7 @@ impl OffscreenRenderer {
             BallstickQuality::Low => 3,
         };
         let low_mode = matches!(quality, BallstickQuality::Low);
+        self.preference.is_low_mode = low_mode;
 
         let mesh_resolution = self.preference.mesh_resolution();
         let generated_meshes = if quality_resolution == mesh_resolution {

@@ -59,9 +59,14 @@ impl SimpleViewerApp {
     ) {
         if let ViewPortEvent::clicked { atom } = event {
             // toggle atom selection in state
-            selected_atoms.borrow_mut().push(atom);
+            let mut selected = selected_atoms.borrow_mut();
+            if let Some(pos) = selected.iter().position(|&index| index == atom) {
+                selected.remove(pos);
+            } else {
+                selected.push(atom);
+            }
             viewport.set_state_by_type(SelectedAtomRenderState {
-                selected_atoms: selected_atoms.clone().borrow().clone(),
+                selected_atoms: selected.clone(),
                 color: [1.0, 0.0, 0.0],
             });
         }
