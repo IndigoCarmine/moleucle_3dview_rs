@@ -1,8 +1,8 @@
-use crate::additional_render::AdditionalRender;
+use crate::additional_render::{AdditionalRender, GpuPipeline};
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::frame_state::RenderFrameState;
 use crate::render_state::SharedRenderStates;
-use crate::scene_types::Scene;
+use crate::scene_types::{Scene, SphereImpostorInstance};
 use crate::viewer::ColorFn;
 use crate::Molecule;
 use egui::TextureId;
@@ -247,8 +247,6 @@ struct GpuResources {
     uniform_bind_group: wgpu::BindGroup,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_count: u32,
-    additional_vertex_buffer: Option<wgpu::Buffer>,
-    additional_vertex_count: u32,
     circles_quad_buffer: wgpu::Buffer,
     circles_instance_buffer: Option<wgpu::Buffer>,
     circles_instance_count: u32,
@@ -365,6 +363,10 @@ impl OffscreenRenderer {
         self.preference.render_style()
     }
 
+    pub fn is_low_mode(&self) -> bool {
+        self.preference.is_low_mode
+    }
+
     pub fn set_render_style(&mut self, render_style: RenderStyle) {
         if self.preference.render_style() != render_style {
             self.preference.set_render_style(render_style);
@@ -430,6 +432,17 @@ impl OffscreenRenderer {
         self.additional_renders.push(render);
     }
 
+    fn additional_pipeline_for<'a>(
+        gpu: &'a GpuResources,
+        pipeline: GpuPipeline,
+    ) -> &'a wgpu::RenderPipeline {
+        match pipeline {
+            GpuPipeline::Triangles => &gpu.additional_pipeline,
+            GpuPipeline::Wireframe => &gpu.wire_pipeline,
+            GpuPipeline::SphereImpostor => &gpu.circles_pipeline,
+        }
+    }
+
     pub fn render_frame_with_state(
         &mut self,
         render_state: &egui_wgpu::RenderState,
@@ -470,15 +483,23 @@ impl OffscreenRenderer {
         } else {
             None
         };
-        let mut additional_scene = Scene {
-            meshes: Vec::new(),
-            entities: Vec::new(),
-        };
-        for additional in &self.additional_renders {
-            additional.update_scene(&mut additional_scene, frame);
-        }
-
-        let additional_vertices = self.build_additional_scene_vertices(&additional_scene);
+        let additional_batches: Vec<(GpuPipeline, Vec<Vertex>, Vec<SphereImpostorInstance>)> = self
+            .additional_renders
+            .iter()
+            .map(|additional| {
+                let mut additional_scene = Scene {
+                    meshes: Vec::new(),
+                    entities: Vec::new(),
+                    sphere_impostors: Vec::new(),
+                };
+                additional.update_scene(&mut additional_scene, frame);
+                (
+                    additional.gpu_pipeline(),
+                    self.build_additional_scene_vertices(&additional_scene),
+                    additional_scene.sphere_impostors,
+                )
+            })
+            .collect();
 
         let gpu = self
             .gpu
@@ -527,20 +548,6 @@ impl OffscreenRenderer {
                 ));
             }
             self.geometry_cache_key = Some(cache_key);
-        }
-
-        if additional_vertices.is_empty() {
-            gpu.additional_vertex_buffer = None;
-            gpu.additional_vertex_count = 0;
-        } else {
-            gpu.additional_vertex_count = additional_vertices.len() as u32;
-            gpu.additional_vertex_buffer = Some(render_state.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("offscreen-additional-vertex-buffer"),
-                    contents: bytemuck::cast_slice(&additional_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
         }
 
         let focal = 1.0 / (frame.fov_y * 0.5).tan();
@@ -626,10 +633,40 @@ impl OffscreenRenderer {
                 pass.draw(0..gpu.vertex_count, 0..1);
             }
 
-            if let Some(vertex_buffer) = &gpu.additional_vertex_buffer {
-                pass.set_pipeline(&gpu.additional_pipeline);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.draw(0..gpu.additional_vertex_count, 0..1);
+            for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
+                additional_batches.into_iter()
+            {
+
+                if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
+                    let additional_vertex_buffer = render_state.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("offscreen-additional-vertex-buffer"),
+                            contents: bytemuck::cast_slice(&additional_vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    );
+
+                    let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind);
+                    pass.set_pipeline(pipeline);
+                    pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
+                    pass.draw(0..additional_vertices.len() as u32, 0..1);
+                }
+
+                if !additional_sphere_impostors.is_empty() {
+                    let sphere_instance_buffer = render_state.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("offscreen-additional-sphere-instance-buffer"),
+                            contents: bytemuck::cast_slice(&additional_sphere_impostors),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    );
+
+                    let pipeline = Self::additional_pipeline_for(gpu, GpuPipeline::SphereImpostor);
+                    pass.set_pipeline(pipeline);
+                    pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
+                    pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
+                    pass.draw(0..6, 0..additional_sphere_impostors.len() as u32);
+                }
             }
         }
 
@@ -655,6 +692,9 @@ impl OffscreenRenderer {
             lin_alg::f32::Vec3::new(0.0, 0.0, 1.0),
             color_fn,
             additionalstate.as_ref(),
+            self.preference.render_style(),
+            self.preference.mesh_resolution(),
+            self.preference.is_low_mode,
         );
         self.render_frame_with_state(render_state, &frame)
     }
@@ -1421,8 +1461,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         uniform_bind_group,
         vertex_buffer: None,
         vertex_count: 0,
-        additional_vertex_buffer: None,
-        additional_vertex_count: 0,
         circles_quad_buffer,
         circles_instance_buffer: None,
         circles_instance_count: 0,

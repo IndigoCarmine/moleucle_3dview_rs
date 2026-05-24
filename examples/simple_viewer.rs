@@ -44,7 +44,13 @@ impl AdditionalRender for ExampleStateRender {
         };
 
         // place sphere at top-left of scene for demo
-        self.add_sphere_sameas_carbon(scene, lin_alg::f32::Vec3::new(0.0, 0.0, 0.0), 0.5, color);
+        self.add_sphere_sameas_carbon(
+            scene,
+            frame,
+            lin_alg::f32::Vec3::new(0.0, 0.0, 0.0),
+            0.5,
+            color,
+        );
         // increment and store counter for next frame
         set_state_by_type(states, count + 1usize);
     }

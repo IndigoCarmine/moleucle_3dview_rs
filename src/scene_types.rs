@@ -167,10 +167,20 @@ impl SceneCamera {
     pub fn update_proj_mat(&mut self) {}
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SphereImpostorInstance {
+    pub center: [f32; 3],
+    pub radius: f32,
+    pub color: [f32; 3],
+    pub _pad: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub entities: Vec<Entity>,
+    pub sphere_impostors: Vec<SphereImpostorInstance>,
 }
 
 impl Scene {

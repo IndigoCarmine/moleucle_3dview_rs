@@ -160,6 +160,9 @@ impl InteractiveMoleculeViewport {
             camera_forward,
             self.viewer.color_fn,
             Some(&self.shared_states),
+            self.offscreen.render_style(),
+            self.offscreen.mesh_resolution(),
+            self.offscreen.is_low_mode(),
         );
 
         self.offscreen

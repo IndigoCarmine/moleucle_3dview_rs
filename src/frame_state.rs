@@ -1,5 +1,6 @@
 use crate::molecule::Molecule;
 use crate::render_state::SharedRenderStates;
+use crate::offscreen_renderer::RenderStyle;
 use crate::viewer::ColorFn;
 use lin_alg::f32::Vec3;
 
@@ -13,6 +14,9 @@ pub struct RenderFrameState<'a> {
     pub camera_forward: Vec3,
     pub color_fn: ColorFn,
     pub shared_states: Option<&'a SharedRenderStates>,
+    pub render_style: RenderStyle,
+    pub mesh_resolution: usize,
+    pub is_low_mode: bool,
 }
 
 impl<'a> RenderFrameState<'a> {
@@ -26,6 +30,9 @@ impl<'a> RenderFrameState<'a> {
         camera_forward: Vec3,
         color_fn: ColorFn,
         shared_states: Option<&'a SharedRenderStates>,
+        render_style: RenderStyle,
+        mesh_resolution: usize,
+        is_low_mode: bool,
     ) -> Self {
         Self {
             molecule,
@@ -37,6 +44,9 @@ impl<'a> RenderFrameState<'a> {
             camera_forward,
             color_fn,
             shared_states,
+            render_style,
+            mesh_resolution,
+            is_low_mode,
         }
     }
 }

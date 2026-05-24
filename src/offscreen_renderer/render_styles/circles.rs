@@ -37,7 +37,7 @@ pub(crate) fn build_circle_instances(
 
         instances.push(CircleInstance {
             center: [atom.position.x, atom.position.y, atom.position.z],
-            radius,
+            radius: radius * 0.5, // Scale down for better visibility in circles style
             color: [color_tuple.0, color_tuple.1, color_tuple.2],
             _pad: 0.0,
         });

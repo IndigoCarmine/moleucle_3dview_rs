@@ -1,17 +1,54 @@
 use crate::atom_radii::vdw_radius;
 use crate::frame_state::RenderFrameState;
+use crate::offscreen_renderer::RenderStyle;
 use crate::render_state::get_state_clone_by_type;
-use crate::scene_types::{Entity, Mesh, Scene};
+use crate::scene_types::{Entity, Mesh, Scene, SphereImpostorInstance};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuPipeline {
+    Triangles,
+    Wireframe,
+    SphereImpostor,
+}
 
 // for adding rendering works to MoleculeViewer.
 pub trait AdditionalRender: Send {
     /// Update the given `scene` using `molecule` and the shared `states` map.
     fn update_scene(&self, scene: &mut Scene, frame: &RenderFrameState<'_>);
 
-    fn add_sphere(&self, scene: &mut Scene, position: Vec3, radius: f32, color: (f32, f32, f32)) {
-        let sphere_mesh = Mesh::new_sphere_uv(1.0, 5, 5);
+    /// Select which GPU pipeline should be used for this render contribution.
+    fn gpu_pipeline(&self) -> GpuPipeline {
+        GpuPipeline::Triangles
+    }
+
+    fn add_sphere(
+        &self,
+        scene: &mut Scene,
+        frame: &RenderFrameState<'_>,
+        position: Vec3,
+        radius: f32,
+        color: (f32, f32, f32),
+    ) {
+        if matches!(self.gpu_pipeline(), GpuPipeline::SphereImpostor)
+            || matches!(frame.render_style, RenderStyle::Circles)
+        {
+            scene.sphere_impostors.push(SphereImpostorInstance {
+                center: [position.x, position.y, position.z],
+                radius,
+                color: [color.0, color.1, color.2],
+                _pad: 0.0,
+            });
+            return;
+        }
+
+        let mesh_resolution = if frame.is_low_mode {
+            frame.mesh_resolution.saturating_div(2).max(3)
+        } else {
+            frame.mesh_resolution.max(3)
+        };
+        let sphere_mesh = Mesh::new_sphere_uv(1.0, mesh_resolution, mesh_resolution * 2);
         let mesh_idx = scene.meshes.len();
         scene.meshes.push(sphere_mesh);
 
@@ -29,12 +66,13 @@ pub trait AdditionalRender: Send {
     fn add_sphere_sameas_carbon(
         &self,
         scene: &mut Scene,
+        frame: &RenderFrameState<'_>,
         position: Vec3,
         relative_radius: f32,
         color: (f32, f32, f32),
     ) {
         let radius = vdw_radius("C") * relative_radius; // Carbon van der Waals radius for demo
-        self.add_sphere(scene, position, radius, color);
+        self.add_sphere(scene, frame, position, radius, color);
     }
     fn add_cylinder(
         &self,
@@ -97,8 +135,9 @@ impl AdditionalRender for SelectedAtomRender {
             if let Some(atom) = molecule.atoms.get(*atom_idx) {
                 self.add_sphere(
                     scene,
+                    frame,
                     atom.position,
-                    vdw_radius(&atom.element) * 0.4, // Render selected atoms at half VDW radius
+                    vdw_radius(&atom.element) * 0.4,
                     color,
                 );
             }
