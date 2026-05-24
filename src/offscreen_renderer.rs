@@ -1,4 +1,5 @@
 use crate::additional_render::AdditionalRender;
+use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::frame_state::RenderFrameState;
 use crate::render_state::SharedRenderStates;
 use crate::scene_types::Scene;
@@ -15,7 +16,7 @@ use wgpu::util::DeviceExt;
 
 mod render_styles;
 use self::render_styles::circles::{build_circle_instances, CircleInstance};
-use self::render_styles::{style_for, StyleBuildContext};
+use self::render_styles::style_for;
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
 const DEFAULT_BOND_CYLINDER_SIDES: usize = 12;
@@ -52,6 +53,7 @@ pub struct OffscreenRendererPreference {
     mesh_resolution: usize,
     lod_settings: LodSettings,
     render_style: RenderStyle,
+    is_low_mode: bool,
 }
 
 impl Default for OffscreenRendererPreference {
@@ -60,6 +62,7 @@ impl Default for OffscreenRendererPreference {
             mesh_resolution: DEFAULT_MESH_RESOLUTION,
             lod_settings: LodSettings::default(),
             render_style: RenderStyle::BallStick,
+            is_low_mode: false,
         }
     }
 }
@@ -257,6 +260,13 @@ struct GeometryCacheKey {
     render_style: RenderStyle,
     color_fn_ptr: usize,
     mesh_resolution: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BallstickQuality {
+    High,
+    Medium,
+    Low,
 }
 
 pub struct OffscreenRenderer {
@@ -595,12 +605,15 @@ impl OffscreenRenderer {
             });
 
             let pipeline = match self.preference.render_style() {
+                RenderStyle::BallStick if self.preference.is_low_mode => &gpu.wire_pipeline,
                 RenderStyle::BallStick => &gpu.pipeline,
                 RenderStyle::BallOnly => &gpu.pipeline,
                 RenderStyle::Circles => &gpu.circles_pipeline,
                 RenderStyle::Wireframe => &gpu.wire_pipeline,
             };
+
             pass.set_pipeline(pipeline);
+
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
             if is_circles {
                 if let Some(instance_buffer) = &gpu.circles_instance_buffer {
@@ -737,13 +750,12 @@ impl OffscreenRenderer {
     }
 
     fn build_scene_vertices(&self, molecule: Option<&Molecule>, color_fn: ColorFn) -> Vec<Vertex> {
-        let context = StyleBuildContext {
-            preference: self.preference,
-            sphere_mesh: &self.sphere_mesh,
-            cylinder_mesh: &self.cylinder_mesh,
-        };
-
-        style_for(self.preference.render_style()).build_vertices(&context, molecule, color_fn)
+        match self.preference.render_style() {
+            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, color_fn),
+            RenderStyle::BallOnly => self.build_ballstick_vertices(molecule, color_fn),
+            RenderStyle::Circles => Vec::new(),
+            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, color_fn),
+        }
     }
 
     fn build_additional_scene_vertices(&self, scene: &Scene) -> Vec<Vertex> {
@@ -786,6 +798,365 @@ impl OffscreenRenderer {
                 }
             }
         }
+
+        vertices
+    }
+
+    fn build_ballstick_vertices(
+        &self,
+        molecule: Option<&Molecule>,
+        color_fn: ColorFn,
+    ) -> Vec<Vertex> {
+        let render_style = self.preference.render_style();
+        let include_bonds = !matches!(render_style, RenderStyle::BallOnly);
+        let quality = self.pick_ballstick_quality(molecule);
+        let mesh_resolution = self.preference.mesh_resolution();
+        let quality_resolution = match quality {
+            BallstickQuality::High => mesh_resolution.max(3),
+            BallstickQuality::Medium => (mesh_resolution / 2).max(3),
+            BallstickQuality::Low => 3,
+        };
+        let low_mode = matches!(quality, BallstickQuality::Low);
+
+        let mesh_resolution = self.preference.mesh_resolution();
+        let generated_meshes = if quality_resolution == mesh_resolution {
+            None
+        } else {
+            Some((
+                RenderMesh::new_sphere_uv(1.0, quality_resolution, quality_resolution * 2),
+                RenderMesh::new_cylinder_open_ended(1.0, 1.0, DEFAULT_BOND_CYLINDER_SIDES),
+            ))
+        };
+        let (sphere_mesh, cylinder_mesh): (&RenderMesh, &RenderMesh) =
+            if let Some((sphere, cylinder)) = &generated_meshes {
+                (sphere, cylinder)
+            } else {
+                (&self.sphere_mesh, &self.cylinder_mesh)
+            };
+
+        let max_vertices = MAX_RENDER_VERTICES;
+        let mut vertices = if let Some(mol) = molecule {
+            // Estimate capacity: bonds * ~50 vertices + atoms * ~200 vertices + axes * ~75 vertices
+            let capacity = mol
+                .bonds
+                .len()
+                .saturating_mul(50)
+                .saturating_add(mol.atoms.len().saturating_mul(200))
+                .saturating_add(225)
+                .min(max_vertices);
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::with_capacity(225.min(max_vertices)) // Just axes
+        };
+
+        if let Some(mol) = molecule {
+            if include_bonds {
+                'bonds: for bond in &mol.bonds {
+                    let a = mol.atoms[bond.atom_a].position;
+                    let b = mol.atoms[bond.atom_b].position;
+                    let diff = b - a;
+                    let len = diff.magnitude();
+                    if len < 0.001 {
+                        continue;
+                    }
+
+                    let dir = diff.to_normalized();
+                    let up = Vec3::new(0.0, 1.0, 0.0);
+                    let orientation = Quaternion::from_unit_vecs(up, dir);
+                    let mid = (a + b) * 0.5;
+
+                    let bond_order = bond.order.max(1) as usize;
+                    let line_offsets = bond_line_offsets(bond_order);
+                    let mut lateral = Vec3::new(1.0, 0.0, 0.0);
+                    if dir.dot(lateral).abs() > 0.9 {
+                        lateral = Vec3::new(0.0, 0.0, 1.0);
+                    }
+                    lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
+
+                    let base_radius = if bond_order <= 1 {
+                        default_ball_stick_bond_radius()
+                    } else {
+                        default_ball_stick_bond_radius() * 0.5
+                    };
+                    for offset in line_offsets {
+                        if low_mode {
+                            if !append_line(
+                                &mut vertices,
+                                a + lateral * offset,
+                                b + lateral * offset,
+                                [0.55, 0.55, 0.55],
+                                max_vertices,
+                            ) {
+                                break 'bonds;
+                            }
+                        } else if !append_mesh_triangles(
+                            &mut vertices,
+                            cylinder_mesh,
+                            mid + lateral * offset,
+                            orientation,
+                            Vec3::new(base_radius, len, base_radius),
+                            [0.55, 0.55, 0.55],
+                            max_vertices,
+                        ) {
+                            break 'bonds;
+                        }
+                    }
+                }
+            }
+
+            'atoms: for (_idx, atom) in mol.atoms.iter().enumerate() {
+                let pos = atom.position;
+                let radius = ball_stick_radius(&atom.element, false);
+                let color_tuple = color_fn(atom, false);
+                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
+
+                if !append_mesh_triangles(
+                    &mut vertices,
+                    sphere_mesh,
+                    pos,
+                    Quaternion::new_identity(),
+                    Vec3::new(radius, radius, radius),
+                    color,
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
+            }
+        }
+
+        if include_bonds {
+            // xyz axes as cylinders
+            let axis_len = 0.2;
+            let axis_radius = 0.01;
+            if low_mode {
+                let _ = append_line(
+                    &mut vertices,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(axis_len, 0.0, 0.0),
+                    [1.0, 0.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_line(
+                    &mut vertices,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, axis_len, 0.0),
+                    [0.0, 1.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_line(
+                    &mut vertices,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, axis_len),
+                    [0.0, 0.0, 1.0],
+                    max_vertices,
+                );
+            } else {
+                let _ = append_mesh_triangles(
+                    &mut vertices,
+                    cylinder_mesh,
+                    Vec3::new(axis_len * 0.5, 0.0, 0.0),
+                    Quaternion::from_axis_angle(
+                        Vec3::new(0.0, 0.0, 1.0),
+                        -std::f32::consts::FRAC_PI_2,
+                    ),
+                    Vec3::new(axis_radius, axis_len, axis_radius),
+                    [1.0, 0.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_mesh_triangles(
+                    &mut vertices,
+                    cylinder_mesh,
+                    Vec3::new(0.0, axis_len * 0.5, 0.0),
+                    Quaternion::new_identity(),
+                    Vec3::new(axis_radius, axis_len, axis_radius),
+                    [0.0, 1.0, 0.0],
+                    max_vertices,
+                );
+                let _ = append_mesh_triangles(
+                    &mut vertices,
+                    cylinder_mesh,
+                    Vec3::new(0.0, 0.0, axis_len * 0.5),
+                    Quaternion::from_axis_angle(
+                        Vec3::new(1.0, 0.0, 0.0),
+                        std::f32::consts::FRAC_PI_2,
+                    ),
+                    Vec3::new(axis_radius, axis_len, axis_radius),
+                    [0.0, 0.0, 1.0],
+                    max_vertices,
+                );
+            }
+        }
+
+        vertices
+    }
+
+    fn pick_ballstick_quality(&self, molecule: Option<&Molecule>) -> BallstickQuality {
+        let Some(mol) = molecule else {
+            return BallstickQuality::High;
+        };
+
+        let high = self.estimate_ballstick_vertices(mol, BallstickQuality::High);
+        if high <= MAX_RENDER_VERTICES {
+            return BallstickQuality::High;
+        }
+
+        let medium = self.estimate_ballstick_vertices(mol, BallstickQuality::Medium);
+        if medium <= MAX_RENDER_VERTICES {
+            return BallstickQuality::Medium;
+        }
+
+        BallstickQuality::Low
+    }
+
+    fn estimate_ballstick_vertices(&self, molecule: &Molecule, quality: BallstickQuality) -> usize {
+        let resolution = match quality {
+            BallstickQuality::High => self.preference.mesh_resolution().max(3),
+            BallstickQuality::Medium => (self.preference.mesh_resolution() / 2).max(3),
+            BallstickQuality::Low => 3,
+        };
+
+        let sphere_vertices_per_atom = resolution
+            .saturating_mul(resolution.saturating_mul(2))
+            .saturating_mul(6);
+        let atom_vertices = molecule
+            .atoms
+            .len()
+            .saturating_mul(sphere_vertices_per_atom);
+
+        let bond_vertices = if matches!(quality, BallstickQuality::Low) {
+            molecule.bonds.len().saturating_mul(2)
+        } else {
+            let cylinder_vertices = DEFAULT_BOND_CYLINDER_SIDES.saturating_mul(6);
+            let bond_instances = molecule.bonds.iter().fold(0usize, |acc, bond| {
+                acc.saturating_add(bond_line_offsets(bond.order.max(1) as usize).len())
+            });
+            bond_instances.saturating_mul(cylinder_vertices)
+        };
+
+        let axis_vertices = if matches!(quality, BallstickQuality::Low) {
+            6
+        } else {
+            (resolution.saturating_mul(2))
+                .saturating_mul(12)
+                .saturating_mul(3)
+        };
+
+        atom_vertices
+            .saturating_add(bond_vertices)
+            .saturating_add(axis_vertices)
+    }
+
+    fn build_wireframe_vertices(
+        &self,
+        molecule: Option<&Molecule>,
+        color_fn: ColorFn,
+    ) -> Vec<Vertex> {
+        let max_vertices = MAX_RENDER_VERTICES;
+        let mut vertices = if let Some(mol) = molecule {
+            // Estimate capacity: bonds * ~4 + atoms * ~6 + axes * ~6
+            // This is much less than ballstick since we're only adding lines
+            let capacity = mol
+                .bonds
+                .len()
+                .saturating_mul(4)
+                .saturating_add(mol.atoms.len().saturating_mul(6))
+                .saturating_add(6)
+                .min(max_vertices);
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::with_capacity(6.min(max_vertices)) // Just axes
+        };
+
+        if let Some(mol) = molecule {
+            'bonds: for bond in &mol.bonds {
+                let a = mol.atoms[bond.atom_a].position;
+                let b = mol.atoms[bond.atom_b].position;
+                let diff = b - a;
+                let len = diff.magnitude();
+                if len < 0.001 {
+                    continue;
+                }
+
+                let dir = diff.to_normalized();
+                let mut lateral = Vec3::new(1.0, 0.0, 0.0);
+                if dir.dot(lateral).abs() > 0.9 {
+                    lateral = Vec3::new(0.0, 0.0, 1.0);
+                }
+                lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
+
+                let bond_order = bond.order.max(1) as usize;
+                for offset in bond_line_offsets(bond_order) {
+                    let off = lateral * offset;
+                    if !append_line(
+                        &mut vertices,
+                        a + off,
+                        b + off,
+                        [0.70, 0.70, 0.72],
+                        max_vertices,
+                    ) {
+                        break 'bonds;
+                    }
+                }
+            }
+
+            'atoms: for (_idx, atom) in mol.atoms.iter().enumerate() {
+                let pos = atom.position;
+                let span = 0.02;
+                let color_tuple = color_fn(atom, false);
+                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
+
+                if !append_line(
+                    &mut vertices,
+                    pos + Vec3::new(-span, 0.0, 0.0),
+                    pos + Vec3::new(span, 0.0, 0.0),
+                    color,
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
+                if !append_line(
+                    &mut vertices,
+                    pos + Vec3::new(0.0, -span, 0.0),
+                    pos + Vec3::new(0.0, span, 0.0),
+                    color,
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
+                if !append_line(
+                    &mut vertices,
+                    pos + Vec3::new(0.0, 0.0, -span),
+                    pos + Vec3::new(0.0, 0.0, span),
+                    color,
+                    max_vertices,
+                ) {
+                    break 'atoms;
+                }
+            }
+        }
+
+        let axis_len = 2.0;
+        let _ = append_line(
+            &mut vertices,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(axis_len, 0.0, 0.0),
+            [1.0, 0.0, 0.0],
+            max_vertices,
+        );
+        let _ = append_line(
+            &mut vertices,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, axis_len, 0.0),
+            [0.0, 1.0, 0.0],
+            max_vertices,
+        );
+        let _ = append_line(
+            &mut vertices,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, axis_len),
+            [0.0, 0.0, 1.0],
+            max_vertices,
+        );
 
         vertices
     }

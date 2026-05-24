@@ -10,16 +10,45 @@ use crate::{
 };
 use lin_alg::f32::Vec3;
 use eframe::egui::{self, PointerButton, Sense};
+pub enum ViewPortEvent {
+    hovered { atom: usize },
+    clicked { atom: usize },
+}
+
+fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortEvent) {
+    if let ViewPortEvent::clicked { atom } = event {
+        // toggle atom selection in state
+        let mut selected: SelectedAtomRenderState =
+            get_state_clone_by_type::<SelectedAtomRenderState>(&viewport.shared_states)
+                .unwrap_or_else(|| SelectedAtomRenderState {
+                    selected_atoms: Vec::new(),
+                    color: [1.0, 0.0, 0.0],
+                });
+        if let Some(_) = selected
+            .selected_atoms
+            .iter()
+            .position(|&index| index == atom)
+        {
+            selected.remove_atom(atom);
+        } else {
+            selected.toggle_atom(atom);
+        }
+        set_state_by_type(&viewport.shared_states, selected);
+    }
+}
 
 pub struct InteractiveMoleculeViewport {
     viewer: MoleculeViewer,
     controller: CameraController<camera::OrbitalCamera>,
     offscreen: OffscreenRenderer,
     shared_states: SharedRenderStates,
+    on_event: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent)>,
 }
 
 impl InteractiveMoleculeViewport {
-    pub fn new() -> Self {
+    pub fn new(
+        on_event: Option<Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent)>>,
+    ) -> Self {
         let viewer = MoleculeViewer::new();
         let shared_states = new_shared_states();
         let mut offscreen = OffscreenRenderer::new();
@@ -30,6 +59,7 @@ impl InteractiveMoleculeViewport {
             controller: CameraController::<camera::OrbitalCamera>::new(),
             offscreen: offscreen,
             shared_states,
+            on_event: on_event.unwrap_or_else(|| Box::new(on_event_default)),
         }
     }
 
@@ -40,6 +70,13 @@ impl InteractiveMoleculeViewport {
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
         self.viewer.set_molecule(molecule);
+    }
+
+    pub fn register_event_handler(
+        &mut self,
+        handler: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent) + 'static>,
+    ) {
+        self.on_event = handler;
     }
 
     pub fn selected_atoms(&self) -> Vec<usize> {
@@ -148,13 +185,29 @@ impl InteractiveMoleculeViewport {
 
     fn handle_interaction(&mut self, ctx: &egui::Context, response: &egui::Response) {
         if response.hovered() {
+            if let Some(pointer) = response.hover_pos() {
+                let local = pointer - response.rect.min;
+                let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
+                    local.x,
+                    local.y,
+                    response.rect.width().max(1.0),
+                    response.rect.height().max(1.0),
+                );
+
+                if let Some(crate::viewer::ViewerEvent::AtomClicked(i)) =
+                    self.viewer.pick(ray_origin, ray_dir)
+                {
+                    let on_event = std::mem::replace(&mut self.on_event, Box::new(|_, _| {}));
+                    on_event(self, ViewPortEvent::hovered { atom: i });
+                    self.on_event = on_event;
+                }
+            }
+
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
                 self.controller.camera.dolly(scroll * 0.02);
             }
-        }
 
-        if response.hovered() {
             let (delta, sec_down, mid_down, shift_down) = ctx.input(|i| {
                 (
                     i.pointer.delta(),
@@ -191,18 +244,9 @@ impl InteractiveMoleculeViewport {
                 if let Some(crate::viewer::ViewerEvent::AtomClicked(i)) =
                     self.viewer.pick(ray_origin, ray_dir)
                 {
-                    let mut selected: SelectedAtomRenderState =
-                        get_state_clone_by_type::<SelectedAtomRenderState>(&self.shared_states)
-                            .unwrap_or_else(|| SelectedAtomRenderState {
-                                selected_atoms: Vec::new(),
-                                color: [1.0, 0.0, 0.0],
-                            });
-                    if let Some(_) = selected.selected_atoms.iter().position(|&index| index == i) {
-                        selected.remove_atom(i);
-                    } else {
-                        selected.toggle_atom(i);
-                    }
-                    set_state_by_type(&self.shared_states, selected);
+                    let on_event = std::mem::replace(&mut self.on_event, Box::new(|_, _| {}));
+                    on_event(self, ViewPortEvent::clicked { atom: i });
+                    self.on_event = on_event;
                 }
             }
         }
@@ -211,6 +255,6 @@ impl InteractiveMoleculeViewport {
 
 impl Default for InteractiveMoleculeViewport {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

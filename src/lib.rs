@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use moleucle_3dview_rs::{Molecule, MoleculeViewer, SelectedAtomRender};
+//! use moleucle_3dview_rs::{Molecule, MoleculeViewer, SelectedAtomRender, ViewPortEvent};
 //! use std::path::Path;
 //!
 //! fn main() {
@@ -51,4 +51,4 @@ pub use render_state::{
 };
 pub use scene_types::{Entity, Mesh, Scene};
 pub use viewer::{default_color_fn, ColorFn, MoleculeViewer};
-pub use viewport::InteractiveMoleculeViewport;
+pub use viewport::{InteractiveMoleculeViewport, ViewPortEvent};
