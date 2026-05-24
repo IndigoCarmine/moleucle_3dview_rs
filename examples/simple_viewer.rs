@@ -96,6 +96,7 @@ impl eframe::App for SimpleViewerApp {
                 let mut style = self.viewport.render_style();
                 ui.selectable_value(&mut style, RenderStyle::BallStick, "BallStick");
                 ui.selectable_value(&mut style, RenderStyle::BallOnly, "BallOnly");
+                ui.selectable_value(&mut style, RenderStyle::Circles, "Circles");
                 ui.selectable_value(&mut style, RenderStyle::Wireframe, "Wireframe");
                 self.viewport.set_render_style(style);
             });

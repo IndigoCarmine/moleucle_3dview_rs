@@ -8,6 +8,7 @@ use crate::{
     camera, offscreen_renderer::LodSettings, Camera, CameraController, Molecule, MoleculeViewer,
     OffscreenRenderer, RenderStyle,
 };
+use lin_alg::f32::Vec3;
 use eframe::egui::{self, PointerButton, Sense};
 
 pub struct InteractiveMoleculeViewport {
@@ -107,9 +108,19 @@ impl InteractiveMoleculeViewport {
             .ensure_resources(render_state, width, height)?;
 
         let view_proj = self.controller.camera.view_projection().data;
+        let cam_rot = self.controller.camera.camera_rotation();
+        let camera_right = cam_rot.rotate_vec(Vec3::new(1.0, 0.0, 0.0));
+        let camera_up = cam_rot.rotate_vec(Vec3::new(0.0, 1.0, 0.0));
+        let camera_forward = cam_rot.rotate_vec(Vec3::new(0.0, 0.0, 1.0));
+
         let frame = RenderFrameState::new(
             self.viewer.molecule.as_ref(),
             view_proj,
+            Some(self.controller.camera.position()),
+            self.controller.camera.fov_y(),
+            camera_right,
+            camera_up,
+            camera_forward,
             self.viewer.color_fn,
             Some(&self.shared_states),
         );
