@@ -21,7 +21,6 @@ impl MolecularRenderStyle for WireframeStyle {
         molecule: Option<&Molecule>,
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
-        let max_vertices = MAX_RENDER_VERTICES;
         let mut vertices = if let Some(mol) = molecule {
             let capacity = mol
                 .bonds
@@ -29,11 +28,12 @@ impl MolecularRenderStyle for WireframeStyle {
                 .saturating_mul(4)
                 .saturating_add(mol.atoms.len().saturating_mul(6))
                 .saturating_add(6)
-                .min(max_vertices);
+                .min(MAX_RENDER_VERTICES);
             Vec::with_capacity(capacity)
         } else {
-            Vec::with_capacity(6.min(max_vertices))
+            Vec::with_capacity(6.min(MAX_RENDER_VERTICES))
         };
+        let max_vertices = usize::MAX;
 
         if let Some(mol) = molecule {
             'bonds: for bond in &mol.bonds {

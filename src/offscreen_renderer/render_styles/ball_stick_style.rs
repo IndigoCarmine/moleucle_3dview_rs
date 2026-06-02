@@ -14,6 +14,7 @@ pub(super) const BALL_STICK_STYLE: BallStickStyle = BallStickStyle;
 
 pub(super) struct BallStickStyle;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BallstickQuality {
     High,
@@ -36,6 +37,7 @@ impl MolecularRenderStyle for BallStickStyle {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn build_ballstick_vertices(
     context: &StyleBuildContext<'_>,
     molecule: Option<&Molecule>,
@@ -66,7 +68,6 @@ pub(super) fn build_ballstick_vertices(
             (context.sphere_mesh, context.cylinder_mesh)
         };
 
-    let max_vertices = MAX_RENDER_VERTICES;
     let mut vertices = if let Some(mol) = molecule {
         let capacity = mol
             .bonds
@@ -74,11 +75,12 @@ pub(super) fn build_ballstick_vertices(
             .saturating_mul(50)
             .saturating_add(mol.atoms.len().saturating_mul(200))
             .saturating_add(225)
-            .min(max_vertices);
+            .min(MAX_RENDER_VERTICES);
         Vec::with_capacity(capacity)
     } else {
-        Vec::with_capacity(225.min(max_vertices))
+        Vec::with_capacity(225.min(MAX_RENDER_VERTICES))
     };
+    let max_vertices = usize::MAX;
 
     if let Some(mol) = molecule {
         if include_bonds {
@@ -214,6 +216,7 @@ pub(super) fn build_ballstick_vertices(
     vertices
 }
 
+#[allow(dead_code)]
 fn pick_ballstick_quality(
     context: &StyleBuildContext<'_>,
     molecule: Option<&Molecule>,
@@ -235,6 +238,7 @@ fn pick_ballstick_quality(
     BallstickQuality::Low
 }
 
+#[allow(dead_code)]
 fn estimate_ballstick_vertices(
     context: &StyleBuildContext<'_>,
     molecule: &Molecule,

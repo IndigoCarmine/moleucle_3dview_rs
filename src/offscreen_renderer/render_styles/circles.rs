@@ -4,8 +4,6 @@ use crate::atom_radii::vdw_radius;
 use crate::viewer::ColorFn;
 use crate::Molecule;
 
-use super::super::MAX_RENDER_VERTICES;
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct CircleInstance {
@@ -24,14 +22,9 @@ pub(crate) fn build_circle_instances(
         return Vec::new();
     };
 
-    let mut instances = Vec::with_capacity(mol.atoms.len().min(MAX_RENDER_VERTICES / 6));
-    let max_instances = MAX_RENDER_VERTICES / 6;
+    let mut instances = Vec::with_capacity(mol.atoms.len());
 
     for atom in &mol.atoms {
-        if instances.len() >= max_instances {
-            break;
-        }
-
         let color_tuple = color_fn(atom, false);
         let radius = vdw_radius(&atom.element); // Scale down for better visibility in circles style
 

@@ -23,6 +23,12 @@ const DEFAULT_BOND_CYLINDER_SIDES: usize = 12;
 const SAFE_MAX_VERTEX_BUFFER_BYTES: usize = 240 * 1024 * 1024;
 const MAX_RENDER_VERTICES: usize = SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<Vertex>();
 
+#[derive(Debug)]
+struct VertexBufferBatch {
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LodSettings {
     pub enabled: bool,
@@ -245,8 +251,7 @@ struct GpuResources {
     circles_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    vertex_buffer: Option<wgpu::Buffer>,
-    vertex_count: u32,
+    vertex_batches: Vec<VertexBufferBatch>,
     circles_quad_buffer: wgpu::Buffer,
     circles_instance_buffer: Option<wgpu::Buffer>,
     circles_instance_count: u32,
@@ -443,6 +448,39 @@ impl OffscreenRenderer {
         }
     }
 
+    fn upload_vertex_batches(
+        device: &wgpu::Device,
+        label_prefix: &str,
+        vertices: Vec<Vertex>,
+        primitive_stride: usize,
+    ) -> Vec<VertexBufferBatch> {
+        let ranges = vertex_batch_bounds(vertices.len(), primitive_stride, MAX_RENDER_VERTICES);
+        let mut batches = Vec::with_capacity(ranges.len());
+
+        for (batch_index, (start, len)) in ranges.into_iter().enumerate() {
+            let end = start + len;
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label_prefix}-{batch_index}")),
+                contents: bytemuck::cast_slice(&vertices[start..end]),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            batches.push(VertexBufferBatch {
+                buffer,
+                count: len as u32,
+            });
+        }
+
+        batches
+    }
+
+    fn draw_vertex_batches(pass: &mut wgpu::RenderPass<'_>, batches: &[VertexBufferBatch]) {
+        for batch in batches {
+            pass.set_vertex_buffer(0, batch.buffer.slice(..));
+            pass.draw(0..batch.count, 0..1);
+        }
+    }
+
     pub fn render_frame_with_state(
         &mut self,
         render_state: &egui_wgpu::RenderState,
@@ -511,25 +549,12 @@ impl OffscreenRenderer {
                 .map(|active_style| active_style.primitive_stride())
                 .unwrap_or(3);
 
-            let mut vertices = vertices;
-            if vertices.len() > MAX_RENDER_VERTICES {
-                let capped = MAX_RENDER_VERTICES - (MAX_RENDER_VERTICES % primitive_stride);
-                vertices.truncate(capped);
-            }
-
-            if vertices.is_empty() {
-                gpu.vertex_buffer = None;
-                gpu.vertex_count = 0;
-            } else {
-                gpu.vertex_count = vertices.len() as u32;
-                gpu.vertex_buffer = Some(render_state.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("offscreen-vertex-buffer"),
-                        contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    },
-                ));
-            }
+            gpu.vertex_batches = Self::upload_vertex_batches(
+                &render_state.device,
+                "offscreen-vertex-buffer",
+                vertices,
+                primitive_stride,
+            );
             self.geometry_cache_key = Some(cache_key);
         }
 
@@ -628,38 +653,40 @@ impl OffscreenRenderer {
                     pass.set_vertex_buffer(1, instance_buffer.slice(..));
                     pass.draw(0..6, 0..gpu.circles_instance_count);
                 }
-            } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.draw(0..gpu.vertex_count, 0..1);
+            } else if !gpu.vertex_batches.is_empty() {
+                Self::draw_vertex_batches(&mut pass, &gpu.vertex_batches);
             }
 
             for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
                 additional_batches.into_iter()
             {
-
                 if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
-                    let additional_vertex_buffer = render_state.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("offscreen-additional-vertex-buffer"),
-                            contents: bytemuck::cast_slice(&additional_vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
+                    let primitive_stride = match pipeline_kind {
+                        GpuPipeline::Triangles => 3,
+                        GpuPipeline::Wireframe => 2,
+                        GpuPipeline::SphereImpostor => 3,
+                    };
+                    let additional_vertex_batches = Self::upload_vertex_batches(
+                        &render_state.device,
+                        "offscreen-additional-vertex-buffer",
+                        additional_vertices,
+                        primitive_stride,
                     );
 
                     let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind);
                     pass.set_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
-                    pass.draw(0..additional_vertices.len() as u32, 0..1);
+                    Self::draw_vertex_batches(&mut pass, &additional_vertex_batches);
                 }
 
                 if !additional_sphere_impostors.is_empty() {
-                    let sphere_instance_buffer = render_state.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("offscreen-additional-sphere-instance-buffer"),
-                            contents: bytemuck::cast_slice(&additional_sphere_impostors),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    );
+                    let sphere_instance_buffer =
+                        render_state
+                            .device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("offscreen-additional-sphere-instance-buffer"),
+                                contents: bytemuck::cast_slice(&additional_sphere_impostors),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
 
                     let pipeline = Self::additional_pipeline_for(gpu, GpuPipeline::SphereImpostor);
                     pass.set_pipeline(pipeline);
@@ -799,7 +826,6 @@ impl OffscreenRenderer {
     }
 
     fn build_additional_scene_vertices(&self, scene: &Scene) -> Vec<Vertex> {
-        let max_vertices = MAX_RENDER_VERTICES;
         let mut vertices = Vec::new();
 
         for entity in &scene.entities {
@@ -814,10 +840,6 @@ impl OffscreenRenderer {
             let color = [entity.color.0, entity.color.1, entity.color.2];
 
             for tri in mesh.indices.chunks_exact(3) {
-                if vertices.len().saturating_add(3) > max_vertices {
-                    return vertices;
-                }
-
                 for &idx in tri {
                     let Some(src) = mesh.vertices.get(idx) else {
                         return vertices;
@@ -1459,8 +1481,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         circles_pipeline,
         uniform_buffer,
         uniform_bind_group,
-        vertex_buffer: None,
-        vertex_count: 0,
+        vertex_batches: Vec::new(),
         circles_quad_buffer,
         circles_instance_buffer: None,
         circles_instance_count: 0,
@@ -1960,5 +1981,49 @@ fn resolution_for_distance(distance: f32, lod_settings: LodSettings) -> usize {
         lod_settings.medium_detail_mesh_resolution
     } else {
         lod_settings.low_detail_mesh_resolution
+    }
+}
+
+fn vertex_batch_bounds(
+    total_vertices: usize,
+    primitive_stride: usize,
+    batch_vertex_limit: usize,
+) -> Vec<(usize, usize)> {
+    let primitive_stride = primitive_stride.max(1);
+    let mut batch_vertex_limit = batch_vertex_limit.max(primitive_stride);
+    batch_vertex_limit -= batch_vertex_limit % primitive_stride;
+    if batch_vertex_limit == 0 {
+        batch_vertex_limit = primitive_stride;
+    }
+
+    let usable_vertices = total_vertices - (total_vertices % primitive_stride);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+
+    while start < usable_vertices {
+        let remaining = usable_vertices - start;
+        let len = remaining.min(batch_vertex_limit);
+        ranges.push((start, len));
+        start += len;
+    }
+
+    ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vertex_batch_bounds;
+
+    #[test]
+    fn vertex_batch_bounds_keeps_full_primitives() {
+        assert_eq!(
+            vertex_batch_bounds(12, 3, 5),
+            vec![(0, 3), (3, 3), (6, 3), (9, 3)]
+        );
+    }
+
+    #[test]
+    fn vertex_batch_bounds_drops_incomplete_tail() {
+        assert_eq!(vertex_batch_bounds(10, 3, 5), vec![(0, 3), (3, 3), (6, 3)]);
     }
 }
