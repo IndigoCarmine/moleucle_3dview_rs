@@ -210,28 +210,30 @@ impl InteractiveMoleculeViewport {
             if scroll.abs() > f32::EPSILON {
                 self.controller.camera.dolly(scroll * 0.02);
             }
+        }
 
-            let (delta, sec_down, mid_down, shift_down) = ctx.input(|i| {
-                (
-                    i.pointer.delta(),
-                    i.pointer.button_down(PointerButton::Secondary),
-                    i.pointer.button_down(PointerButton::Middle),
-                    i.modifiers.shift,
-                )
-            });
-
-            // Use raw pointer delta so secondary/middle drag works reliably on the image widget.
-            if sec_down || mid_down {
-                if mid_down || shift_down {
-                    self.controller
-                        .camera
-                        .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
-                } else {
-                    self.controller
-                        .camera
-                        .orbit(delta.x * 0.005, delta.y * 0.005);
-                }
+        // Primary drag: orbit (Shift+drag or middle/right drag: pan)
+        if response.dragged_by(PointerButton::Primary) {
+            let delta = response.drag_delta();
+            let shift_down = ctx.input(|i| i.modifiers.shift);
+            if shift_down {
+                self.controller
+                    .camera
+                    .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
+            } else {
+                self.controller
+                    .camera
+                    .orbit(delta.x * 0.005, delta.y * 0.005);
             }
+        }
+
+        if response.dragged_by(PointerButton::Secondary)
+            || response.dragged_by(PointerButton::Middle)
+        {
+            let delta = response.drag_delta();
+            self.controller
+                .camera
+                .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
         }
 
         if response.clicked_by(PointerButton::Primary) {
