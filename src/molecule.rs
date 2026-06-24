@@ -231,6 +231,62 @@ impl AtomRecord {
 pub struct Molecule {
     pub atoms: Vec<Atom>,
     pub bonds: Vec<Bond>,
+    /// Bumped whenever atom positions change in place (e.g. trajectory
+    /// playback). Renderers key their cached GPU geometry on this so they
+    /// rebuild when the same `Molecule` is mutated rather than replaced.
+    generation: u64,
+}
+
+impl Molecule {
+    /// Monotonic counter that changes whenever positions are updated in place.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Replace every atom's position in place, leaving elements, bonds, ids and
+    /// metadata untouched. Intended for trajectory playback: no allocation, no
+    /// bond re-inference, and all existing `Atom` storage is reused, so feeding
+    /// successive frames of 500k atoms is allocation-free.
+    ///
+    /// `positions` must contain exactly `self.atoms.len()` entries (already in
+    /// the crate's nanometer units); otherwise the molecule is left unchanged.
+    pub fn set_positions(&mut self, positions: &[Vec3]) -> Result<(), String> {
+        if positions.len() != self.atoms.len() {
+            return Err(format!(
+                "position count {} does not match atom count {}",
+                positions.len(),
+                self.atoms.len()
+            ));
+        }
+        for (atom, &pos) in self.atoms.iter_mut().zip(positions) {
+            atom.position = pos;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Like [`set_positions`](Self::set_positions) but takes Ångström
+    /// coordinates and applies the crate's Å→nm conversion. Useful for feeding
+    /// trajectory frames straight from common formats without an intermediate
+    /// `Vec<Vec3>`.
+    pub fn set_positions_angstrom(&mut self, coords: &[[f32; 3]]) -> Result<(), String> {
+        if coords.len() != self.atoms.len() {
+            return Err(format!(
+                "position count {} does not match atom count {}",
+                coords.len(),
+                self.atoms.len()
+            ));
+        }
+        for (atom, c) in self.atoms.iter_mut().zip(coords) {
+            atom.position = Vec3::new(
+                c[0] * ANGSTROM_TO_NANOMETER,
+                c[1] * ANGSTROM_TO_NANOMETER,
+                c[2] * ANGSTROM_TO_NANOMETER,
+            );
+        }
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
+    }
 }
 
 impl Molecule {
@@ -347,7 +403,11 @@ impl Molecule {
             }
         }
 
-        Ok(Molecule { atoms, bonds })
+        Ok(Molecule {
+            atoms,
+            bonds,
+            generation: 0,
+        })
     }
 
     /// Parse a PDB file and create a Molecule
@@ -414,7 +474,11 @@ impl Molecule {
             Self::infer_bonds(&atoms)
         };
 
-        Ok(Molecule { atoms, bonds })
+        Ok(Molecule {
+            atoms,
+            bonds,
+            generation: 0,
+        })
     }
 
     /// Infer bonds based on van der Waals radii.
@@ -623,5 +687,58 @@ mod tests {
     fn grid_handles_empty_and_single() {
         assert!(Molecule::infer_bonds(&[]).is_empty());
         assert!(Molecule::infer_bonds(&[atom_at("C", 0.0, 0.0, 0.0)]).is_empty());
+    }
+
+    #[test]
+    fn set_positions_updates_in_place_and_bumps_generation() {
+        let mut mol = Molecule {
+            atoms: vec![atom_at("C", 0.0, 0.0, 0.0), atom_at("O", 1.0, 0.0, 0.0)],
+            bonds: vec![Bond {
+                atom_a: 0,
+                atom_b: 1,
+                order: 1,
+            }],
+            generation: 0,
+        };
+
+        let new_pos = [Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0)];
+        mol.set_positions(&new_pos).unwrap();
+
+        assert_eq!(mol.atoms[0].position, new_pos[0]);
+        assert_eq!(mol.atoms[1].position, new_pos[1]);
+        assert_eq!(mol.generation(), 1);
+        // Topology untouched.
+        assert_eq!(mol.bonds.len(), 1);
+        assert_eq!(mol.atoms[0].element.as_str(), "C");
+
+        mol.set_positions(&new_pos).unwrap();
+        assert_eq!(mol.generation(), 2);
+    }
+
+    #[test]
+    fn set_positions_rejects_length_mismatch() {
+        let mut mol = Molecule {
+            atoms: vec![atom_at("C", 0.0, 0.0, 0.0)],
+            bonds: Vec::new(),
+            generation: 5,
+        };
+        assert!(mol.set_positions(&[]).is_err());
+        // Unchanged on error.
+        assert_eq!(mol.generation(), 5);
+        assert_eq!(mol.atoms[0].position, Vec3::new(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn set_positions_angstrom_applies_nm_conversion() {
+        let mut mol = Molecule {
+            atoms: vec![atom_at("C", 0.0, 0.0, 0.0)],
+            bonds: Vec::new(),
+            generation: 0,
+        };
+        mol.set_positions_angstrom(&[[10.0, 20.0, 30.0]]).unwrap();
+        let p = mol.atoms[0].position;
+        assert!((p.x - 1.0).abs() < 1e-6);
+        assert!((p.y - 2.0).abs() < 1e-6);
+        assert!((p.z - 3.0).abs() < 1e-6);
     }
 }

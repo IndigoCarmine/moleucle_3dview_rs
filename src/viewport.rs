@@ -72,6 +72,17 @@ impl InteractiveMoleculeViewport {
         self.viewer.set_molecule(molecule);
     }
 
+    /// Update atom positions in place for trajectory playback (nanometer
+    /// units). See [`MoleculeViewer::update_positions`].
+    pub fn update_positions(&mut self, positions: &[Vec3]) -> Result<(), String> {
+        self.viewer.update_positions(positions)
+    }
+
+    /// Update atom positions in place from Ångström coordinates.
+    pub fn update_positions_angstrom(&mut self, coords: &[[f32; 3]]) -> Result<(), String> {
+        self.viewer.update_positions_angstrom(coords)
+    }
+
     pub fn register_event_handler(
         &mut self,
         handler: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent) + 'static>,

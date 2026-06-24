@@ -18,11 +18,47 @@ pub(super) struct GpuResources {
     pub(super) circles_quad_buffer: wgpu::Buffer,
     pub(super) circles_instance_buffer: Option<wgpu::Buffer>,
     pub(super) circles_instance_count: u32,
+    /// Allocated byte capacity of `circles_instance_buffer`, so trajectory
+    /// frames of equal size reuse it via `write_buffer` instead of reallocating.
+    pub(super) circles_instance_capacity: usize,
     /// Unit cylinder mesh (non-indexed triangle list) shared by every bond.
     pub(super) bond_mesh_buffer: wgpu::Buffer,
     pub(super) bond_mesh_vertex_count: u32,
     pub(super) bond_instance_buffer: Option<wgpu::Buffer>,
     pub(super) bond_instance_count: u32,
+    pub(super) bond_instance_capacity: usize,
+}
+
+/// Upload `data` into a persistent instance buffer, reusing the existing
+/// allocation via `queue.write_buffer` when it still fits. Returns the new
+/// instance count. Reusing the buffer keeps trajectory playback (fixed
+/// topology, only positions change) from reallocating a large GPU buffer every
+/// frame.
+pub(super) fn upload_instances<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &mut Option<wgpu::Buffer>,
+    capacity_bytes: &mut usize,
+    label: &str,
+    data: &[T],
+) -> u32 {
+    if data.is_empty() {
+        return 0;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(data);
+
+    let fits = buffer.is_some() && bytes.len() <= *capacity_bytes;
+    if fits {
+        queue.write_buffer(buffer.as_ref().unwrap(), 0, bytes);
+    } else {
+        *buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytes,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        }));
+        *capacity_bytes = bytes.len();
+    }
+    data.len() as u32
 }
 
 pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
@@ -192,10 +228,12 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         circles_quad_buffer,
         circles_instance_buffer: None,
         circles_instance_count: 0,
+        circles_instance_capacity: 0,
         bond_mesh_buffer,
         bond_mesh_vertex_count,
         bond_instance_buffer: None,
         bond_instance_count: 0,
+        bond_instance_capacity: 0,
     }
 }
 

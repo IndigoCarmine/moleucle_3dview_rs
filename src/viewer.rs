@@ -68,6 +68,33 @@ impl MoleculeViewer {
         self.dirty = true;
     }
 
+    /// Update the loaded molecule's atom positions in place for trajectory
+    /// playback. Elements, bonds and metadata are untouched, so feeding
+    /// successive frames reuses all existing storage. `positions` must match
+    /// the atom count and be in the crate's nanometer units. Returns `Err` if
+    /// no molecule is loaded or the count mismatches.
+    pub fn update_positions(&mut self, positions: &[Vec3]) -> Result<(), String> {
+        let mol = self
+            .molecule
+            .as_mut()
+            .ok_or_else(|| "no molecule loaded".to_string())?;
+        mol.set_positions(positions)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Like [`update_positions`](Self::update_positions) but takes Ångström
+    /// coordinates, applying the crate's Å→nm conversion.
+    pub fn update_positions_angstrom(&mut self, coords: &[[f32; 3]]) -> Result<(), String> {
+        let mol = self
+            .molecule
+            .as_mut()
+            .ok_or_else(|| "no molecule loaded".to_string())?;
+        mol.set_positions_angstrom(coords)?;
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn add_additional_render<R: AdditionalRender + 'static>(&mut self, render: R) {
         // keep the render's ownership and mark dirty
         self.additional_render.push(Box::new(render));
