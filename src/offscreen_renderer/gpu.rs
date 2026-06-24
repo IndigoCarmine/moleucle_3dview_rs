@@ -2,13 +2,15 @@ use egui_wgpu::wgpu;
 use wgpu::util::DeviceExt;
 
 use super::render_styles::circles::CircleInstance;
-use super::{CircleQuadVertex, Uniforms, Vertex};
+use super::{BondInstance, BondMeshVertex, CircleQuadVertex, RenderMesh, Uniforms, Vertex};
+use super::DEFAULT_BOND_CYLINDER_SIDES;
 
 pub(super) struct GpuResources {
     pub(super) pipeline: wgpu::RenderPipeline,
     pub(super) additional_pipeline: wgpu::RenderPipeline,
     pub(super) wire_pipeline: wgpu::RenderPipeline,
     pub(super) circles_pipeline: wgpu::RenderPipeline,
+    pub(super) bond_pipeline: wgpu::RenderPipeline,
     pub(super) uniform_buffer: wgpu::Buffer,
     pub(super) uniform_bind_group: wgpu::BindGroup,
     pub(super) vertex_buffer: Option<wgpu::Buffer>,
@@ -16,6 +18,11 @@ pub(super) struct GpuResources {
     pub(super) circles_quad_buffer: wgpu::Buffer,
     pub(super) circles_instance_buffer: Option<wgpu::Buffer>,
     pub(super) circles_instance_count: u32,
+    /// Unit cylinder mesh (non-indexed triangle list) shared by every bond.
+    pub(super) bond_mesh_buffer: wgpu::Buffer,
+    pub(super) bond_mesh_vertex_count: u32,
+    pub(super) bond_instance_buffer: Option<wgpu::Buffer>,
+    pub(super) bond_instance_count: u32,
 }
 
 pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
@@ -150,11 +157,34 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         usage: wgpu::BufferUsages::VERTEX,
     });
 
+    let bond_pipeline = create_bond_pipeline(device, &layout);
+    // Expand the indexed unit cylinder into a non-indexed triangle list, the
+    // shared geometry every bond instance is drawn with.
+    let cylinder = RenderMesh::new_cylinder_open_ended(1.0, 1.0, DEFAULT_BOND_CYLINDER_SIDES);
+    let bond_mesh_vertices: Vec<BondMeshVertex> = cylinder
+        .indices
+        .iter()
+        .map(|&idx| {
+            let v = cylinder.vertices[idx];
+            BondMeshVertex {
+                position: v.position,
+                normal: v.normal,
+            }
+        })
+        .collect();
+    let bond_mesh_vertex_count = bond_mesh_vertices.len() as u32;
+    let bond_mesh_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-bond-mesh-buffer"),
+        contents: bytemuck::cast_slice(&bond_mesh_vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
     GpuResources {
         pipeline,
         additional_pipeline,
         wire_pipeline,
         circles_pipeline,
+        bond_pipeline,
         uniform_buffer,
         uniform_bind_group,
         vertex_buffer: None,
@@ -162,6 +192,10 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         circles_quad_buffer,
         circles_instance_buffer: None,
         circles_instance_count: 0,
+        bond_mesh_buffer,
+        bond_mesh_vertex_count,
+        bond_instance_buffer: None,
+        bond_instance_count: 0,
     }
 }
 
@@ -291,6 +325,104 @@ fn create_circles_pipeline(
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24Plus,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_bond_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("offscreen-bond-shader"),
+        source: wgpu::ShaderSource::Wgsl(BOND_SHADER.into()),
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("offscreen-bond-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                // Per-vertex unit cylinder geometry.
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BondMeshVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: std::mem::size_of::<[f32; 3]>() as u64,
+                            shader_location: 1,
+                        },
+                    ],
+                },
+                // Per-bond instance data: mid, radius, axis, length, color.
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BondInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: std::mem::size_of::<[f32; 3]>() as u64,
+                            shader_location: 3,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: std::mem::size_of::<[f32; 4]>() as u64,
+                            shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: std::mem::size_of::<[f32; 7]>() as u64,
+                            shader_location: 5,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: std::mem::size_of::<[f32; 8]>() as u64,
+                            shader_location: 6,
+                        },
+                    ],
+                },
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            // Cylinder is open-ended; don't cull so it's visible from inside too.
             cull_mode: None,
             ..Default::default()
         },
@@ -547,3 +679,94 @@ fn fs_main(in: VSOut) -> FSOut {
     return out;
 }
 "#;
+
+const BOND_SHADER: &str = r#"
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    viewport: vec2<f32>,
+    focal: f32,
+    _pad: f32,
+    camera_right: vec4<f32>,
+    camera_up: vec4<f32>,
+    camera_forward: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VSOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+};
+
+@vertex
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) mid: vec3<f32>,
+    @location(3) radius: f32,
+    @location(4) axis: vec3<f32>,
+    @location(5) length: f32,
+    @location(6) color: vec3<f32>,
+) -> VSOut {
+    // Orthonormal basis perpendicular to the (unit) cylinder axis.
+    var up = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(axis.y) > 0.99) {
+        up = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let right = normalize(cross(up, axis));
+    let forward = cross(axis, right);
+
+    // Unit cylinder: position.xz on the circle, position.y in [-0.5, 0.5].
+    let world_pos =
+        mid
+        + right * (position.x * radius)
+        + axis * (position.y * length)
+        + forward * (position.z * radius);
+
+    // Radial normal lies in the right/forward plane.
+    let world_normal =
+        normalize(right * normal.x + forward * normal.z);
+
+    var out: VSOut;
+    out.position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
+    out.color = color;
+    out.normal = world_normal;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.normal);
+    let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
+    let diffuse = max(dot(n, l), 0.0);
+    let ambient = 0.25;
+    return vec4<f32>(in.color * (ambient + 0.75 * diffuse), 1.0);
+}
+"#;
+
+#[cfg(test)]
+mod shader_tests {
+    use super::*;
+
+    fn validate(name: &str, src: &str) {
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("{name} failed to parse:\n{}", e.emit_to_string(src)));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name} failed validation: {e:?}"));
+    }
+
+    #[test]
+    fn all_wgsl_shaders_compile() {
+        validate("MESH_SHADER", MESH_SHADER);
+        validate("WIRE_SHADER", WIRE_SHADER);
+        validate("CIRCLES_SHADER", CIRCLES_SHADER);
+        validate("BOND_SHADER", BOND_SHADER);
+    }
+}

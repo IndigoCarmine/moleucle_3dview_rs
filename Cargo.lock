@@ -1422,6 +1422,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "lin_alg",
+ "naga",
  "tempfile",
  "winit",
 ]
