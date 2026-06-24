@@ -1,6 +1,6 @@
 [package]
 name = "moleucle_3dview_rs"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "A lightweight 3D molecule visualization library utilizing the graphics crate."
 license = "MIT"
@@ -11,10 +11,10 @@ categories = ["visualization", "science"]
 [dependencies]
 bio_files = "0.5.2"
 bytemuck = { version = "1.25.0", features = ["derive"] }
-eframe = { version = "0.34.2", default-features = false, features = ["default_fonts", "wgpu"] }
-egui = "0.34.2"
-egui-wgpu = "0.34.2"
-lin_alg = { version = "1.4.2", features = ["computer_graphics"] }
+eframe = { version = "0.34.3", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.34.3"
+egui-wgpu = "0.34.3"
+lin_alg = { version = "1.4.3", features = ["computer_graphics"] }
 winit = "0.30.13"
 
 [dev-dependencies]
