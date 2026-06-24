@@ -371,7 +371,11 @@ impl OffscreenRenderer {
             None
         };
 
-        let circles_instances = if use_impostors {
+        // Impostor instances don't depend on the camera, so rebuild them only
+        // when the molecule/style/color changes — not every frame. This keeps
+        // an idle 500k-atom view from re-allocating and re-uploading a large
+        // instance buffer on every orbit.
+        let circles_instances = if use_impostors && self.geometry_cache_key != Some(cache_key) {
             Some(Self::build_impostor_instances(render_style, frame))
         } else {
             None
