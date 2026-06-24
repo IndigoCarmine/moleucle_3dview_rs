@@ -451,30 +451,24 @@ impl OffscreenRenderer {
             .as_mut()
             .ok_or_else(|| "Offscreen GPU resources are not initialized".to_string())?;
 
-        if let Some(vertices) = rebuilt_vertices {
+        if let Some(mut vertices) = rebuilt_vertices {
             let primitive_stride = style
                 .map(|active_style| active_style.primitive_stride())
                 .unwrap_or(3);
 
-            let mut vertices = vertices;
             if vertices.len() > MAX_RENDER_VERTICES {
                 let capped = MAX_RENDER_VERTICES - (MAX_RENDER_VERTICES % primitive_stride);
                 vertices.truncate(capped);
             }
 
-            if vertices.is_empty() {
-                gpu.vertex_buffer = None;
-                gpu.vertex_count = 0;
-            } else {
-                gpu.vertex_count = vertices.len() as u32;
-                gpu.vertex_buffer = Some(render_state.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("offscreen-vertex-buffer"),
-                        contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    },
-                ));
-            }
+            gpu.vertex_count = upload_instances(
+                &render_state.device,
+                &render_state.queue,
+                &mut gpu.vertex_buffer,
+                &mut gpu.vertex_capacity,
+                "offscreen-vertex-buffer",
+                &vertices,
+            );
             self.geometry_cache_key = Some(cache_key);
         }
 

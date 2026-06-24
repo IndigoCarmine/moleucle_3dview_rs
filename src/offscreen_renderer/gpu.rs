@@ -15,6 +15,9 @@ pub(super) struct GpuResources {
     pub(super) uniform_bind_group: wgpu::BindGroup,
     pub(super) vertex_buffer: Option<wgpu::Buffer>,
     pub(super) vertex_count: u32,
+    /// Allocated byte capacity of `vertex_buffer`, so equal-size mesh rebuilds
+    /// (e.g. trajectory frames of a small molecule) reuse it via `write_buffer`.
+    pub(super) vertex_capacity: usize,
     pub(super) circles_quad_buffer: wgpu::Buffer,
     pub(super) circles_instance_buffer: Option<wgpu::Buffer>,
     pub(super) circles_instance_count: u32,
@@ -225,6 +228,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         uniform_bind_group,
         vertex_buffer: None,
         vertex_count: 0,
+        vertex_capacity: 0,
         circles_quad_buffer,
         circles_instance_buffer: None,
         circles_instance_count: 0,
