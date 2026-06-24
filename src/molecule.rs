@@ -337,32 +337,91 @@ impl Molecule {
         Ok(Molecule { atoms, bonds })
     }
 
-    /// Infer bonds based on van der Waals radii (optimized)
+    /// Infer bonds based on van der Waals radii.
+    ///
+    /// Uses a uniform spatial grid so that each atom is only compared against
+    /// atoms in neighboring cells instead of every other atom. This turns the
+    /// previous O(n^2) scan into ~O(n) for typical molecular densities, which
+    /// is required to handle hundreds of thousands of atoms.
     fn infer_bonds(atoms: &[Atom]) -> Vec<Bond> {
-        let mut bonds = Vec::new();
         const BOND_DISTANCE_FACTOR: f32 = 1.6;
         const BOND_DISTANCE_FACTOR_SQ: f32 = BOND_DISTANCE_FACTOR * BOND_DISTANCE_FACTOR;
         const MIN_DISTANCE: f32 = 0.01;
         const MIN_DISTANCE_SQ: f32 = MIN_DISTANCE * MIN_DISTANCE;
 
-        // Pre-allocate with estimated capacity
-        bonds.reserve(atoms.len() * 2); // Typical atom has ~2 bonds
+        if atoms.len() < 2 {
+            return Vec::new();
+        }
+
+        // Precompute radii once: vdw_radius() allocates a String per call, so
+        // looking it up inside the inner loop would dominate the runtime.
+        let radii: Vec<f32> = atoms.iter().map(|a| vdw_radius(&a.element)).collect();
+        let max_radius = radii.iter().fold(0.0_f32, |m, &r| m.max(r));
+
+        // Two atoms can only bond if their centers are within
+        // (radius_i + radius_j) * factor. The largest possible such distance is
+        // 2 * max_radius * factor, so a cell of that size guarantees every
+        // bonded pair lands in the same or an adjacent cell.
+        let cell_size = (2.0 * max_radius * BOND_DISTANCE_FACTOR).max(MIN_DISTANCE);
+        let inv_cell = 1.0 / cell_size;
+
+        // Bounding-box origin so cell indices stay small and non-negative-ish.
+        let mut min = atoms[0].position;
+        for atom in &atoms[1..] {
+            min.x = min.x.min(atom.position.x);
+            min.y = min.y.min(atom.position.y);
+            min.z = min.z.min(atom.position.z);
+        }
+
+        let cell_of = |p: Vec3| -> (i32, i32, i32) {
+            (
+                ((p.x - min.x) * inv_cell).floor() as i32,
+                ((p.y - min.y) * inv_cell).floor() as i32,
+                ((p.z - min.z) * inv_cell).floor() as i32,
+            )
+        };
+
+        // Bucket atom indices by grid cell.
+        let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, atom) in atoms.iter().enumerate() {
+            grid.entry(cell_of(atom.position)).or_default().push(i);
+        }
+
+        let mut bonds = Vec::with_capacity(atoms.len() * 2); // ~2 bonds per atom
+        let mut neighbors: Vec<usize> = Vec::new();
 
         for i in 0..atoms.len() {
             let pos_i = atoms[i].position;
-            let radius_i = vdw_radius(&atoms[i].element);
+            let radius_i = radii[i];
+            let (cx, cy, cz) = cell_of(pos_i);
 
-            for j in (i + 1)..atoms.len() {
-                let pos_j = atoms[j].position;
-                let diff = pos_j - pos_i;
+            // Gather candidate atoms from the 3x3x3 block of cells around i.
+            neighbors.clear();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                            neighbors.extend_from_slice(bucket);
+                        }
+                    }
+                }
+            }
+
+            for &j in &neighbors {
+                // Each unordered pair is emitted once, preserving atom_a < atom_b.
+                if j <= i {
+                    continue;
+                }
+
+                let diff = atoms[j].position - pos_i;
                 let dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 
-                // Early exit if too far
                 if dist_sq < MIN_DISTANCE_SQ {
                     continue;
                 }
 
-                let expected_dist = radius_i + vdw_radius(&atoms[j].element);
+                let expected_dist = radius_i + radii[j];
                 let max_dist_sq = expected_dist * expected_dist * BOND_DISTANCE_FACTOR_SQ;
 
                 if dist_sq < max_dist_sq {
@@ -391,5 +450,104 @@ fn extract_element_symbol(element: &str, atom_name: &str) -> String {
             .next()
             .map(|c| c.to_uppercase().collect::<String>())
             .unwrap_or_else(|| "?".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom_at(element: &str, x: f32, y: f32, z: f32) -> Atom {
+        Atom {
+            position: Vec3::new(x, y, z),
+            element: element.to_string(),
+            id: 0,
+            name: None,
+            res_name: None,
+            chain_id: None,
+            res_seq: None,
+            occupancy: None,
+            temp_factor: None,
+            charge: None,
+        }
+    }
+
+    /// Original O(n^2) reference implementation, kept only for the test.
+    fn infer_bonds_bruteforce(atoms: &[Atom]) -> Vec<Bond> {
+        const FACTOR_SQ: f32 = 1.6 * 1.6;
+        const MIN_DISTANCE_SQ: f32 = 0.01 * 0.01;
+        let mut bonds = Vec::new();
+        for i in 0..atoms.len() {
+            let radius_i = vdw_radius(&atoms[i].element);
+            for j in (i + 1)..atoms.len() {
+                let diff = atoms[j].position - atoms[i].position;
+                let dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+                if dist_sq < MIN_DISTANCE_SQ {
+                    continue;
+                }
+                let expected = radius_i + vdw_radius(&atoms[j].element);
+                if dist_sq < expected * expected * FACTOR_SQ {
+                    bonds.push(Bond {
+                        atom_a: i,
+                        atom_b: j,
+                        order: 1,
+                    });
+                }
+            }
+        }
+        bonds
+    }
+
+    fn sorted_pairs(bonds: &[Bond]) -> Vec<(usize, usize)> {
+        let mut pairs: Vec<(usize, usize)> =
+            bonds.iter().map(|b| (b.atom_a, b.atom_b)).collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    #[test]
+    fn grid_matches_bruteforce_on_small_molecule() {
+        // A small grid of carbons spaced ~0.15 nm apart so neighbors bond.
+        let mut atoms = Vec::new();
+        for ix in 0..4 {
+            for iy in 0..4 {
+                for iz in 0..4 {
+                    atoms.push(atom_at(
+                        "C",
+                        ix as f32 * 0.15,
+                        iy as f32 * 0.15,
+                        iz as f32 * 0.15,
+                    ));
+                }
+            }
+        }
+
+        let grid = Molecule::infer_bonds(&atoms);
+        let brute = infer_bonds_bruteforce(&atoms);
+        assert_eq!(sorted_pairs(&grid), sorted_pairs(&brute));
+    }
+
+    #[test]
+    fn grid_matches_bruteforce_mixed_elements_and_gaps() {
+        let atoms = vec![
+            atom_at("C", 0.0, 0.0, 0.0),
+            atom_at("O", 0.12, 0.0, 0.0),
+            atom_at("H", 0.12, 0.10, 0.0),
+            // Far away cluster that must not bond to the first.
+            atom_at("N", 5.0, 5.0, 5.0),
+            atom_at("C", 5.13, 5.0, 5.0),
+            // Coincident atoms must be skipped by the MIN_DISTANCE guard.
+            atom_at("C", 0.0, 0.0, 0.0),
+        ];
+
+        let grid = Molecule::infer_bonds(&atoms);
+        let brute = infer_bonds_bruteforce(&atoms);
+        assert_eq!(sorted_pairs(&grid), sorted_pairs(&brute));
+    }
+
+    #[test]
+    fn grid_handles_empty_and_single() {
+        assert!(Molecule::infer_bonds(&[]).is_empty());
+        assert!(Molecule::infer_bonds(&[atom_at("C", 0.0, 0.0, 0.0)]).is_empty());
     }
 }
