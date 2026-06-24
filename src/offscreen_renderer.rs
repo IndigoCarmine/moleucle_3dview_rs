@@ -15,14 +15,24 @@ mod render_styles;
 
 pub use lod::LodSettings;
 
+use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
 use gpu::{create_gpu_resources, GpuResources};
-use render_styles::circles::build_circle_instances;
+use render_styles::circles::{
+    build_circle_instances, build_sphere_instances, CircleInstance, MAX_IMPOSTOR_INSTANCES,
+};
 use render_styles::{style_for, StyleBuildContext};
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
 const DEFAULT_BOND_CYLINDER_SIDES: usize = 12;
 const SAFE_MAX_VERTEX_BUFFER_BYTES: usize = 240 * 1024 * 1024;
 const MAX_RENDER_VERTICES: usize = SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<Vertex>();
+
+/// Vertices in the lowest-quality UV sphere (lat=3, lon=6): 3 * 6 quads * 6.
+const MIN_SPHERE_VERTICES_PER_ATOM: usize = 3 * 6 * 6;
+/// Above this atom count the mesh path cannot fit even at lowest quality, so
+/// the renderer auto-switches mesh styles to the sphere-impostor pipeline
+/// instead of silently truncating atoms.
+const MAX_MESH_ATOMS: usize = MAX_RENDER_VERTICES / MIN_SPHERE_VERTICES_PER_ATOM;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OffscreenRendererPreference {
@@ -107,6 +117,28 @@ struct Vertex {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CircleQuadVertex {
     corner: [f32; 2],
+}
+
+/// Per-vertex data for the unit cylinder reused by every instanced bond.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BondMeshVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+}
+
+/// Per-bond instance data. One cylinder mesh is drawn once per bond via GPU
+/// instancing, so a molecule's bonds cost a single small mesh plus this packed
+/// array instead of duplicating cylinder geometry per bond on the CPU.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BondInstance {
+    mid: [f32; 3],
+    radius: f32,
+    axis: [f32; 3],
+    length: f32,
+    color: [f32; 3],
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -332,15 +364,23 @@ impl OffscreenRenderer {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let is_circles = matches!(self.preference.render_style(), RenderStyle::Circles);
-        let style = if is_circles {
+        let render_style = self.preference.render_style();
+        let atom_count = frame.molecule.map(|mol| mol.atoms.len()).unwrap_or(0);
+        // Mesh styles duplicate sphere geometry per atom and would overflow the
+        // vertex buffer past MAX_MESH_ATOMS, silently dropping atoms. Fall back
+        // to the instanced impostor pipeline so every atom is still drawn.
+        let mesh_overflow = matches!(render_style, RenderStyle::BallStick | RenderStyle::BallOnly)
+            && atom_count > MAX_MESH_ATOMS;
+        let use_impostors = matches!(render_style, RenderStyle::Circles) || mesh_overflow;
+
+        let style = if use_impostors {
             None
         } else {
-            Some(style_for(self.preference.render_style()))
+            Some(style_for(render_style))
         };
 
         let cache_key = self.build_geometry_cache_key(frame.molecule, frame.color_fn);
-        let rebuilt_vertices = if !is_circles && self.geometry_cache_key != Some(cache_key) {
+        let rebuilt_vertices = if !use_impostors && self.geometry_cache_key != Some(cache_key) {
             if let Some(active_style) = style {
                 let ctx = StyleBuildContext {
                     preference: self.preference,
@@ -355,12 +395,23 @@ impl OffscreenRenderer {
             None
         };
 
-        let circles_instances = if is_circles {
-            Some(build_circle_instances(
-                frame.molecule,
-                frame.color_fn,
-                frame.camera_position,
-            ))
+        // Impostor instances don't depend on the camera, so rebuild them only
+        // when the molecule/style/color changes — not every frame. This keeps
+        // an idle 500k-atom view from re-allocating and re-uploading a large
+        // instance buffer on every orbit.
+        let cache_miss = self.geometry_cache_key != Some(cache_key);
+        let circles_instances = if use_impostors && cache_miss {
+            Some(Self::build_impostor_instances(render_style, frame))
+        } else {
+            None
+        };
+
+        // When BallStick falls back to impostors, render its bonds via the
+        // instanced cylinder pipeline (one instance per bond) so connectivity
+        // still shows at a scale where the per-bond CPU mesh would overflow.
+        let bonds_as_instances = mesh_overflow && matches!(render_style, RenderStyle::BallStick);
+        let bond_instances = if bonds_as_instances && cache_miss {
+            Some(Self::build_bond_instances(frame))
         } else {
             None
         };
@@ -432,6 +483,23 @@ impl OffscreenRenderer {
             self.geometry_cache_key = Some(cache_key);
         }
 
+        if let Some(instances) = bond_instances {
+            if instances.is_empty() {
+                gpu.bond_instance_buffer = None;
+                gpu.bond_instance_count = 0;
+            } else {
+                gpu.bond_instance_count = instances.len() as u32;
+                gpu.bond_instance_buffer = Some(render_state.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("offscreen-bond-instance-buffer"),
+                        contents: bytemuck::cast_slice(&instances),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            self.geometry_cache_key = Some(cache_key);
+        }
+
         let focal = 1.0 / (frame.fov_y * 0.5).tan();
         let uniforms = Uniforms {
             view_proj: frame.view_proj,
@@ -493,22 +561,41 @@ impl OffscreenRenderer {
                 multiview_mask: None,
             });
 
-            let pipeline = match self.preference.render_style() {
-                RenderStyle::BallStick if self.preference.is_low_mode() => &gpu.wire_pipeline,
-                RenderStyle::BallStick => &gpu.pipeline,
-                RenderStyle::BallOnly => &gpu.pipeline,
-                RenderStyle::Circles => &gpu.circles_pipeline,
-                RenderStyle::Wireframe => &gpu.wire_pipeline,
+            let pipeline = if use_impostors {
+                &gpu.circles_pipeline
+            } else {
+                match self.preference.render_style() {
+                    RenderStyle::BallStick if self.preference.is_low_mode() => &gpu.wire_pipeline,
+                    RenderStyle::BallStick => &gpu.pipeline,
+                    RenderStyle::BallOnly => &gpu.pipeline,
+                    RenderStyle::Circles => &gpu.circles_pipeline,
+                    RenderStyle::Wireframe => &gpu.wire_pipeline,
+                }
             };
 
             pass.set_pipeline(pipeline);
 
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
-            if is_circles {
+            if use_impostors {
                 if let Some(instance_buffer) = &gpu.circles_instance_buffer {
                     pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
                     pass.set_vertex_buffer(1, instance_buffer.slice(..));
                     pass.draw(0..6, 0..gpu.circles_instance_count);
+                }
+
+                // Instanced bonds for the BallStick large-molecule fallback.
+                if bonds_as_instances {
+                    if let Some(bond_buffer) = &gpu.bond_instance_buffer {
+                        if gpu.bond_instance_count > 0 {
+                            pass.set_pipeline(&gpu.bond_pipeline);
+                            pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
+                            pass.set_vertex_buffer(1, bond_buffer.slice(..));
+                            pass.draw(
+                                0..gpu.bond_mesh_vertex_count,
+                                0..gpu.bond_instance_count,
+                            );
+                        }
+                    }
                 }
             } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
@@ -653,6 +740,68 @@ impl OffscreenRenderer {
 
         self.color_texture = Some(color_texture);
         self.depth_texture = Some(depth_texture);
+    }
+
+    /// Build one cylinder instance per bond for the instanced bond pipeline.
+    /// Used by the large-molecule BallStick fallback so bonds still render at a
+    /// scale where the per-bond CPU mesh path would overflow the vertex buffer.
+    fn build_bond_instances(frame: &RenderFrameState<'_>) -> Vec<BondInstance> {
+        let Some(mol) = frame.molecule else {
+            return Vec::new();
+        };
+
+        let radius = default_ball_stick_bond_radius();
+        let color = [0.55, 0.55, 0.55];
+        let mut instances = Vec::with_capacity(mol.bonds.len().min(MAX_IMPOSTOR_INSTANCES));
+
+        for bond in &mol.bonds {
+            if instances.len() >= MAX_IMPOSTOR_INSTANCES {
+                break;
+            }
+            let a = mol.atoms[bond.atom_a].position;
+            let b = mol.atoms[bond.atom_b].position;
+            let diff = b - a;
+            let len = diff.magnitude();
+            if len < 1e-4 {
+                continue;
+            }
+            let axis = diff / len;
+            let mid = (a + b) * 0.5;
+            instances.push(BondInstance {
+                mid: [mid.x, mid.y, mid.z],
+                radius,
+                axis: [axis.x, axis.y, axis.z],
+                length: len,
+                color,
+                _pad: 0.0,
+            });
+        }
+
+        instances
+    }
+
+    /// Build sphere-impostor instances for the active style, choosing a radius
+    /// that matches the mesh each style would otherwise draw.
+    fn build_impostor_instances(
+        render_style: RenderStyle,
+        frame: &RenderFrameState<'_>,
+    ) -> Vec<CircleInstance> {
+        match render_style {
+            RenderStyle::Circles => {
+                build_circle_instances(frame.molecule, frame.color_fn, frame.camera_position)
+            }
+            RenderStyle::BallOnly => build_sphere_instances(frame.molecule, frame.color_fn, |atom| {
+                vdw_radius(&atom.element)
+            }),
+            // BallStick falls back here only when the mesh path would overflow;
+            // bonds are dropped at that scale, but every atom is still shown.
+            RenderStyle::BallStick => {
+                build_sphere_instances(frame.molecule, frame.color_fn, |atom| {
+                    ball_stick_radius(&atom.element, false)
+                })
+            }
+            RenderStyle::Wireframe => Vec::new(),
+        }
     }
 
     fn build_geometry_cache_key(

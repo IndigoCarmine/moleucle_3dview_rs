@@ -3,12 +3,68 @@ use lin_alg::f32::Vec3;
 use std::path::Path;
 
 const ANGSTROM_TO_NANOMETER: f32 = 0.1;
-#[derive(Debug, Clone)]
-pub struct Atom {
-    pub position: Vec3,
-    pub element: String,
-    pub id: usize,
-    // PDB-specific attributes (optional for MOL2)
+
+/// Compact, `Copy` element symbol stored inline so each atom carries no
+/// per-atom heap allocation for its element (the previous `String` cost ~24
+/// bytes plus a heap allocation per atom — prohibitive at 500k atoms).
+///
+/// Chemical symbols are at most a few ASCII characters; longer inputs are
+/// truncated, which never happens for real element symbols.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Element {
+    bytes: [u8; 3],
+    len: u8,
+}
+
+impl Element {
+    pub fn new(symbol: &str) -> Self {
+        let src = symbol.as_bytes();
+        let len = src.len().min(3);
+        let mut bytes = [0u8; 3];
+        bytes[..len].copy_from_slice(&src[..len]);
+        Self {
+            bytes,
+            len: len as u8,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Bytes were copied from a valid &str of ASCII element symbols.
+        std::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+}
+
+impl std::ops::Deref for Element {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Debug for Element {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl std::fmt::Display for Element {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for Element {
+    fn from(s: &str) -> Self {
+        Element::new(s)
+    }
+}
+
+/// Optional PDB-specific attributes. Boxed behind `Atom::meta` so a minimal
+/// atom (MOL2, or any source without these fields) stays small and so the
+/// per-frame render loops iterate a tight `Atom` array instead of paying for
+/// seven mostly-empty `Option`s inline.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AtomMeta {
     pub name: Option<String>,     // Atom identifier (e.g., "CA", "C00")
     pub res_name: Option<String>, // Residue name (e.g., "ALA")
     pub chain_id: Option<char>,   // Chain identifier (e.g., 'A')
@@ -16,6 +72,74 @@ pub struct Atom {
     pub occupancy: Option<f32>,   // Occupancy factor (0.0-1.0)
     pub temp_factor: Option<f32>, // Temperature factor
     pub charge: Option<String>,   // Formal charge
+}
+
+#[derive(Debug, Clone)]
+pub struct Atom {
+    pub position: Vec3,
+    pub element: Element,
+    pub id: usize,
+    /// PDB-specific attributes, present only when a source provides them.
+    pub meta: Option<Box<AtomMeta>>,
+}
+
+impl Atom {
+    pub fn name(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.name.as_deref())
+    }
+
+    pub fn res_name(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.res_name.as_deref())
+    }
+
+    pub fn chain_id(&self) -> Option<char> {
+        self.meta.as_ref().and_then(|m| m.chain_id)
+    }
+
+    pub fn res_seq(&self) -> Option<i32> {
+        self.meta.as_ref().and_then(|m| m.res_seq)
+    }
+
+    pub fn occupancy(&self) -> Option<f32> {
+        self.meta.as_ref().and_then(|m| m.occupancy)
+    }
+
+    pub fn temp_factor(&self) -> Option<f32> {
+        self.meta.as_ref().and_then(|m| m.temp_factor)
+    }
+
+    pub fn charge(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.charge.as_deref())
+    }
+
+    /// Build an atom from a parsed PDB record, moving its owned strings instead
+    /// of cloning them. `id` is the atom's 0-based index.
+    fn from_record(id: usize, record: AtomRecord) -> Self {
+        let element = Element::new(&extract_element_symbol(&record.element, &record.name));
+        let chain_id = (record.chain_id != ' ').then_some(record.chain_id);
+        let occupancy = (record.occupancy > 0.0).then_some(record.occupancy);
+        let temp_factor = (record.temp_factor > 0.0).then_some(record.temp_factor);
+        let charge = (!record.charge.is_empty()).then_some(record.charge);
+
+        Atom {
+            position: Vec3::new(
+                record.x * ANGSTROM_TO_NANOMETER,
+                record.y * ANGSTROM_TO_NANOMETER,
+                record.z * ANGSTROM_TO_NANOMETER,
+            ),
+            element,
+            id,
+            meta: Some(Box::new(AtomMeta {
+                name: Some(record.name),
+                res_name: Some(record.res_name),
+                chain_id,
+                res_seq: Some(record.res_seq),
+                occupancy,
+                temp_factor,
+                charge,
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -185,15 +309,9 @@ impl Molecule {
                                     y * ANGSTROM_TO_NANOMETER,
                                     z * ANGSTROM_TO_NANOMETER,
                                 ),
-                                element,
+                                element: Element::new(&element),
                                 id: atoms.len() + 1,
-                                name: None,
-                                res_name: None,
-                                chain_id: None,
-                                res_seq: None,
-                                occupancy: None,
-                                temp_factor: None,
-                                charge: None,
+                                meta: None,
                             });
                         }
                     }
@@ -237,18 +355,18 @@ impl Molecule {
     /// Otherwise, bonds are inferred based on atomic distances.
     pub fn from_pdb(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let mut atom_records = Vec::new();
+        // Parse directly into Atoms so the per-record strings are moved once
+        // rather than cloned into a second vector; no intermediate
+        // Vec<AtomRecord> is kept alive, halving peak memory for large files.
+        let mut atoms: Vec<Atom> = Vec::new();
         let mut conect_bonds = Vec::new();
-
-        // Pre-allocate with typical capacities
-        atom_records.reserve(256);
         conect_bonds.reserve(256);
 
         for line in content.lines() {
             match &line[..std::cmp::min(6, line.len())] {
                 "ATOM  " | "HETATM" => {
                     if let Some(record) = AtomRecord::from_line(line) {
-                        atom_records.push(record);
+                        atoms.push(Atom::from_record(atoms.len(), record));
                     }
                 }
                 "CONECT" => {
@@ -278,44 +396,6 @@ impl Molecule {
             }
         }
 
-        // Convert AtomRecords to Atoms
-        let atoms: Vec<Atom> = atom_records
-            .iter()
-            .enumerate()
-            .map(|(idx, record)| Atom {
-                position: Vec3::new(
-                    record.x * ANGSTROM_TO_NANOMETER,
-                    record.y * ANGSTROM_TO_NANOMETER,
-                    record.z * ANGSTROM_TO_NANOMETER,
-                ),
-                element: extract_element_symbol(&record.element, &record.name),
-                id: idx,
-                name: Some(record.name.clone()),
-                res_name: Some(record.res_name.clone()),
-                chain_id: if record.chain_id != ' ' {
-                    Some(record.chain_id)
-                } else {
-                    None
-                },
-                res_seq: Some(record.res_seq),
-                occupancy: if record.occupancy > 0.0 {
-                    Some(record.occupancy)
-                } else {
-                    None
-                },
-                temp_factor: if record.temp_factor > 0.0 {
-                    Some(record.temp_factor)
-                } else {
-                    None
-                },
-                charge: if !record.charge.is_empty() {
-                    Some(record.charge.clone())
-                } else {
-                    None
-                },
-            })
-            .collect();
-
         // Use explicit bonds if available, otherwise infer from distances
         let bonds = if !conect_bonds.is_empty() {
             let mut result = Vec::new();
@@ -337,32 +417,91 @@ impl Molecule {
         Ok(Molecule { atoms, bonds })
     }
 
-    /// Infer bonds based on van der Waals radii (optimized)
+    /// Infer bonds based on van der Waals radii.
+    ///
+    /// Uses a uniform spatial grid so that each atom is only compared against
+    /// atoms in neighboring cells instead of every other atom. This turns the
+    /// previous O(n^2) scan into ~O(n) for typical molecular densities, which
+    /// is required to handle hundreds of thousands of atoms.
     fn infer_bonds(atoms: &[Atom]) -> Vec<Bond> {
-        let mut bonds = Vec::new();
         const BOND_DISTANCE_FACTOR: f32 = 1.6;
         const BOND_DISTANCE_FACTOR_SQ: f32 = BOND_DISTANCE_FACTOR * BOND_DISTANCE_FACTOR;
         const MIN_DISTANCE: f32 = 0.01;
         const MIN_DISTANCE_SQ: f32 = MIN_DISTANCE * MIN_DISTANCE;
 
-        // Pre-allocate with estimated capacity
-        bonds.reserve(atoms.len() * 2); // Typical atom has ~2 bonds
+        if atoms.len() < 2 {
+            return Vec::new();
+        }
+
+        // Precompute radii once: vdw_radius() allocates a String per call, so
+        // looking it up inside the inner loop would dominate the runtime.
+        let radii: Vec<f32> = atoms.iter().map(|a| vdw_radius(&a.element)).collect();
+        let max_radius = radii.iter().fold(0.0_f32, |m, &r| m.max(r));
+
+        // Two atoms can only bond if their centers are within
+        // (radius_i + radius_j) * factor. The largest possible such distance is
+        // 2 * max_radius * factor, so a cell of that size guarantees every
+        // bonded pair lands in the same or an adjacent cell.
+        let cell_size = (2.0 * max_radius * BOND_DISTANCE_FACTOR).max(MIN_DISTANCE);
+        let inv_cell = 1.0 / cell_size;
+
+        // Bounding-box origin so cell indices stay small and non-negative-ish.
+        let mut min = atoms[0].position;
+        for atom in &atoms[1..] {
+            min.x = min.x.min(atom.position.x);
+            min.y = min.y.min(atom.position.y);
+            min.z = min.z.min(atom.position.z);
+        }
+
+        let cell_of = |p: Vec3| -> (i32, i32, i32) {
+            (
+                ((p.x - min.x) * inv_cell).floor() as i32,
+                ((p.y - min.y) * inv_cell).floor() as i32,
+                ((p.z - min.z) * inv_cell).floor() as i32,
+            )
+        };
+
+        // Bucket atom indices by grid cell.
+        let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, atom) in atoms.iter().enumerate() {
+            grid.entry(cell_of(atom.position)).or_default().push(i);
+        }
+
+        let mut bonds = Vec::with_capacity(atoms.len() * 2); // ~2 bonds per atom
+        let mut neighbors: Vec<usize> = Vec::new();
 
         for i in 0..atoms.len() {
             let pos_i = atoms[i].position;
-            let radius_i = vdw_radius(&atoms[i].element);
+            let radius_i = radii[i];
+            let (cx, cy, cz) = cell_of(pos_i);
 
-            for j in (i + 1)..atoms.len() {
-                let pos_j = atoms[j].position;
-                let diff = pos_j - pos_i;
+            // Gather candidate atoms from the 3x3x3 block of cells around i.
+            neighbors.clear();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                            neighbors.extend_from_slice(bucket);
+                        }
+                    }
+                }
+            }
+
+            for &j in &neighbors {
+                // Each unordered pair is emitted once, preserving atom_a < atom_b.
+                if j <= i {
+                    continue;
+                }
+
+                let diff = atoms[j].position - pos_i;
                 let dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 
-                // Early exit if too far
                 if dist_sq < MIN_DISTANCE_SQ {
                     continue;
                 }
 
-                let expected_dist = radius_i + vdw_radius(&atoms[j].element);
+                let expected_dist = radius_i + radii[j];
                 let max_dist_sq = expected_dist * expected_dist * BOND_DISTANCE_FACTOR_SQ;
 
                 if dist_sq < max_dist_sq {
@@ -391,5 +530,98 @@ fn extract_element_symbol(element: &str, atom_name: &str) -> String {
             .next()
             .map(|c| c.to_uppercase().collect::<String>())
             .unwrap_or_else(|| "?".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom_at(element: &str, x: f32, y: f32, z: f32) -> Atom {
+        Atom {
+            position: Vec3::new(x, y, z),
+            element: Element::new(element),
+            id: 0,
+            meta: None,
+        }
+    }
+
+    /// Original O(n^2) reference implementation, kept only for the test.
+    fn infer_bonds_bruteforce(atoms: &[Atom]) -> Vec<Bond> {
+        const FACTOR_SQ: f32 = 1.6 * 1.6;
+        const MIN_DISTANCE_SQ: f32 = 0.01 * 0.01;
+        let mut bonds = Vec::new();
+        for i in 0..atoms.len() {
+            let radius_i = vdw_radius(&atoms[i].element);
+            for j in (i + 1)..atoms.len() {
+                let diff = atoms[j].position - atoms[i].position;
+                let dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+                if dist_sq < MIN_DISTANCE_SQ {
+                    continue;
+                }
+                let expected = radius_i + vdw_radius(&atoms[j].element);
+                if dist_sq < expected * expected * FACTOR_SQ {
+                    bonds.push(Bond {
+                        atom_a: i,
+                        atom_b: j,
+                        order: 1,
+                    });
+                }
+            }
+        }
+        bonds
+    }
+
+    fn sorted_pairs(bonds: &[Bond]) -> Vec<(usize, usize)> {
+        let mut pairs: Vec<(usize, usize)> =
+            bonds.iter().map(|b| (b.atom_a, b.atom_b)).collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    #[test]
+    fn grid_matches_bruteforce_on_small_molecule() {
+        // A small grid of carbons spaced ~0.15 nm apart so neighbors bond.
+        let mut atoms = Vec::new();
+        for ix in 0..4 {
+            for iy in 0..4 {
+                for iz in 0..4 {
+                    atoms.push(atom_at(
+                        "C",
+                        ix as f32 * 0.15,
+                        iy as f32 * 0.15,
+                        iz as f32 * 0.15,
+                    ));
+                }
+            }
+        }
+
+        let grid = Molecule::infer_bonds(&atoms);
+        let brute = infer_bonds_bruteforce(&atoms);
+        assert_eq!(sorted_pairs(&grid), sorted_pairs(&brute));
+    }
+
+    #[test]
+    fn grid_matches_bruteforce_mixed_elements_and_gaps() {
+        let atoms = vec![
+            atom_at("C", 0.0, 0.0, 0.0),
+            atom_at("O", 0.12, 0.0, 0.0),
+            atom_at("H", 0.12, 0.10, 0.0),
+            // Far away cluster that must not bond to the first.
+            atom_at("N", 5.0, 5.0, 5.0),
+            atom_at("C", 5.13, 5.0, 5.0),
+            // Coincident atoms must be skipped by the MIN_DISTANCE guard.
+            atom_at("C", 0.0, 0.0, 0.0),
+        ];
+
+        let grid = Molecule::infer_bonds(&atoms);
+        let brute = infer_bonds_bruteforce(&atoms);
+        assert_eq!(sorted_pairs(&grid), sorted_pairs(&brute));
+    }
+
+    #[test]
+    fn grid_handles_empty_and_single() {
+        assert!(Molecule::infer_bonds(&[]).is_empty());
+        assert!(Molecule::infer_bonds(&[atom_at("C", 0.0, 0.0, 0.0)]).is_empty());
     }
 }
