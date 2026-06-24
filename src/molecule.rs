@@ -111,6 +111,35 @@ impl Atom {
     pub fn charge(&self) -> Option<&str> {
         self.meta.as_ref().and_then(|m| m.charge.as_deref())
     }
+
+    /// Build an atom from a parsed PDB record, moving its owned strings instead
+    /// of cloning them. `id` is the atom's 0-based index.
+    fn from_record(id: usize, record: AtomRecord) -> Self {
+        let element = Element::new(&extract_element_symbol(&record.element, &record.name));
+        let chain_id = (record.chain_id != ' ').then_some(record.chain_id);
+        let occupancy = (record.occupancy > 0.0).then_some(record.occupancy);
+        let temp_factor = (record.temp_factor > 0.0).then_some(record.temp_factor);
+        let charge = (!record.charge.is_empty()).then_some(record.charge);
+
+        Atom {
+            position: Vec3::new(
+                record.x * ANGSTROM_TO_NANOMETER,
+                record.y * ANGSTROM_TO_NANOMETER,
+                record.z * ANGSTROM_TO_NANOMETER,
+            ),
+            element,
+            id,
+            meta: Some(Box::new(AtomMeta {
+                name: Some(record.name),
+                res_name: Some(record.res_name),
+                chain_id,
+                res_seq: Some(record.res_seq),
+                occupancy,
+                temp_factor,
+                charge,
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -326,18 +355,18 @@ impl Molecule {
     /// Otherwise, bonds are inferred based on atomic distances.
     pub fn from_pdb(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let mut atom_records = Vec::new();
+        // Parse directly into Atoms so the per-record strings are moved once
+        // rather than cloned into a second vector; no intermediate
+        // Vec<AtomRecord> is kept alive, halving peak memory for large files.
+        let mut atoms: Vec<Atom> = Vec::new();
         let mut conect_bonds = Vec::new();
-
-        // Pre-allocate with typical capacities
-        atom_records.reserve(256);
         conect_bonds.reserve(256);
 
         for line in content.lines() {
             match &line[..std::cmp::min(6, line.len())] {
                 "ATOM  " | "HETATM" => {
                     if let Some(record) = AtomRecord::from_line(line) {
-                        atom_records.push(record);
+                        atoms.push(Atom::from_record(atoms.len(), record));
                     }
                 }
                 "CONECT" => {
@@ -366,46 +395,6 @@ impl Molecule {
                 _ => {}
             }
         }
-
-        // Convert AtomRecords to Atoms
-        let atoms: Vec<Atom> = atom_records
-            .iter()
-            .enumerate()
-            .map(|(idx, record)| Atom {
-                position: Vec3::new(
-                    record.x * ANGSTROM_TO_NANOMETER,
-                    record.y * ANGSTROM_TO_NANOMETER,
-                    record.z * ANGSTROM_TO_NANOMETER,
-                ),
-                element: Element::new(&extract_element_symbol(&record.element, &record.name)),
-                id: idx,
-                meta: Some(Box::new(AtomMeta {
-                    name: Some(record.name.clone()),
-                    res_name: Some(record.res_name.clone()),
-                    chain_id: if record.chain_id != ' ' {
-                        Some(record.chain_id)
-                    } else {
-                        None
-                    },
-                    res_seq: Some(record.res_seq),
-                    occupancy: if record.occupancy > 0.0 {
-                        Some(record.occupancy)
-                    } else {
-                        None
-                    },
-                    temp_factor: if record.temp_factor > 0.0 {
-                        Some(record.temp_factor)
-                    } else {
-                        None
-                    },
-                    charge: if !record.charge.is_empty() {
-                        Some(record.charge.clone())
-                    } else {
-                        None
-                    },
-                })),
-            })
-            .collect();
 
         // Use explicit bonds if available, otherwise infer from distances
         let bonds = if !conect_bonds.is_empty() {
