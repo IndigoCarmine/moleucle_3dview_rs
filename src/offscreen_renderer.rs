@@ -15,14 +15,22 @@ mod render_styles;
 
 pub use lod::LodSettings;
 
+use crate::atom_radii::{ball_stick_radius, vdw_radius};
 use gpu::{create_gpu_resources, GpuResources};
-use render_styles::circles::build_circle_instances;
+use render_styles::circles::{build_circle_instances, build_sphere_instances, CircleInstance};
 use render_styles::{style_for, StyleBuildContext};
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
 const DEFAULT_BOND_CYLINDER_SIDES: usize = 12;
 const SAFE_MAX_VERTEX_BUFFER_BYTES: usize = 240 * 1024 * 1024;
 const MAX_RENDER_VERTICES: usize = SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<Vertex>();
+
+/// Vertices in the lowest-quality UV sphere (lat=3, lon=6): 3 * 6 quads * 6.
+const MIN_SPHERE_VERTICES_PER_ATOM: usize = 3 * 6 * 6;
+/// Above this atom count the mesh path cannot fit even at lowest quality, so
+/// the renderer auto-switches mesh styles to the sphere-impostor pipeline
+/// instead of silently truncating atoms.
+const MAX_MESH_ATOMS: usize = MAX_RENDER_VERTICES / MIN_SPHERE_VERTICES_PER_ATOM;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OffscreenRendererPreference {
@@ -332,15 +340,23 @@ impl OffscreenRenderer {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let is_circles = matches!(self.preference.render_style(), RenderStyle::Circles);
-        let style = if is_circles {
+        let render_style = self.preference.render_style();
+        let atom_count = frame.molecule.map(|mol| mol.atoms.len()).unwrap_or(0);
+        // Mesh styles duplicate sphere geometry per atom and would overflow the
+        // vertex buffer past MAX_MESH_ATOMS, silently dropping atoms. Fall back
+        // to the instanced impostor pipeline so every atom is still drawn.
+        let mesh_overflow = matches!(render_style, RenderStyle::BallStick | RenderStyle::BallOnly)
+            && atom_count > MAX_MESH_ATOMS;
+        let use_impostors = matches!(render_style, RenderStyle::Circles) || mesh_overflow;
+
+        let style = if use_impostors {
             None
         } else {
-            Some(style_for(self.preference.render_style()))
+            Some(style_for(render_style))
         };
 
         let cache_key = self.build_geometry_cache_key(frame.molecule, frame.color_fn);
-        let rebuilt_vertices = if !is_circles && self.geometry_cache_key != Some(cache_key) {
+        let rebuilt_vertices = if !use_impostors && self.geometry_cache_key != Some(cache_key) {
             if let Some(active_style) = style {
                 let ctx = StyleBuildContext {
                     preference: self.preference,
@@ -355,12 +371,8 @@ impl OffscreenRenderer {
             None
         };
 
-        let circles_instances = if is_circles {
-            Some(build_circle_instances(
-                frame.molecule,
-                frame.color_fn,
-                frame.camera_position,
-            ))
+        let circles_instances = if use_impostors {
+            Some(Self::build_impostor_instances(render_style, frame))
         } else {
             None
         };
@@ -493,18 +505,22 @@ impl OffscreenRenderer {
                 multiview_mask: None,
             });
 
-            let pipeline = match self.preference.render_style() {
-                RenderStyle::BallStick if self.preference.is_low_mode() => &gpu.wire_pipeline,
-                RenderStyle::BallStick => &gpu.pipeline,
-                RenderStyle::BallOnly => &gpu.pipeline,
-                RenderStyle::Circles => &gpu.circles_pipeline,
-                RenderStyle::Wireframe => &gpu.wire_pipeline,
+            let pipeline = if use_impostors {
+                &gpu.circles_pipeline
+            } else {
+                match self.preference.render_style() {
+                    RenderStyle::BallStick if self.preference.is_low_mode() => &gpu.wire_pipeline,
+                    RenderStyle::BallStick => &gpu.pipeline,
+                    RenderStyle::BallOnly => &gpu.pipeline,
+                    RenderStyle::Circles => &gpu.circles_pipeline,
+                    RenderStyle::Wireframe => &gpu.wire_pipeline,
+                }
             };
 
             pass.set_pipeline(pipeline);
 
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
-            if is_circles {
+            if use_impostors {
                 if let Some(instance_buffer) = &gpu.circles_instance_buffer {
                     pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
                     pass.set_vertex_buffer(1, instance_buffer.slice(..));
@@ -653,6 +669,30 @@ impl OffscreenRenderer {
 
         self.color_texture = Some(color_texture);
         self.depth_texture = Some(depth_texture);
+    }
+
+    /// Build sphere-impostor instances for the active style, choosing a radius
+    /// that matches the mesh each style would otherwise draw.
+    fn build_impostor_instances(
+        render_style: RenderStyle,
+        frame: &RenderFrameState<'_>,
+    ) -> Vec<CircleInstance> {
+        match render_style {
+            RenderStyle::Circles => {
+                build_circle_instances(frame.molecule, frame.color_fn, frame.camera_position)
+            }
+            RenderStyle::BallOnly => build_sphere_instances(frame.molecule, frame.color_fn, |atom| {
+                vdw_radius(&atom.element)
+            }),
+            // BallStick falls back here only when the mesh path would overflow;
+            // bonds are dropped at that scale, but every atom is still shown.
+            RenderStyle::BallStick => {
+                build_sphere_instances(frame.molecule, frame.color_fn, |atom| {
+                    ball_stick_radius(&atom.element, false)
+                })
+            }
+            RenderStyle::Wireframe => Vec::new(),
+        }
     }
 
     fn build_geometry_cache_key(
