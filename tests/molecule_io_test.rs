@@ -76,7 +76,7 @@ fn test_mol2_element_symbols() {
     let mol = Molecule::from_mol2(Path::new(BENZENE_MOL2_PATH))
         .expect("Failed to load Benzene.mol2");
 
-    let elements: std::collections::HashSet<_> = mol.atoms.iter().map(|a| a.element.clone()).collect();
+    let elements: std::collections::HashSet<_> = mol.atoms.iter().map(|a| a.element.to_string()).collect();
 
     // Benzene should only have C and H
     assert!(
@@ -198,7 +198,7 @@ fn test_pdb_element_extraction() {
     let mol = Molecule::from_pdb(Path::new(A_PDB_PATH))
         .expect("Failed to load A.pdb");
 
-    let elements: std::collections::HashSet<_> = mol.atoms.iter().map(|a| a.element.clone()).collect();
+    let elements: std::collections::HashSet<_> = mol.atoms.iter().map(|a| a.element.to_string()).collect();
 
     // A.pdb contains mainly carbon and hydrogen
     assert!(

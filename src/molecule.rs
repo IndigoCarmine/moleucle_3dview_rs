@@ -3,12 +3,68 @@ use lin_alg::f32::Vec3;
 use std::path::Path;
 
 const ANGSTROM_TO_NANOMETER: f32 = 0.1;
-#[derive(Debug, Clone)]
-pub struct Atom {
-    pub position: Vec3,
-    pub element: String,
-    pub id: usize,
-    // PDB-specific attributes (optional for MOL2)
+
+/// Compact, `Copy` element symbol stored inline so each atom carries no
+/// per-atom heap allocation for its element (the previous `String` cost ~24
+/// bytes plus a heap allocation per atom — prohibitive at 500k atoms).
+///
+/// Chemical symbols are at most a few ASCII characters; longer inputs are
+/// truncated, which never happens for real element symbols.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Element {
+    bytes: [u8; 3],
+    len: u8,
+}
+
+impl Element {
+    pub fn new(symbol: &str) -> Self {
+        let src = symbol.as_bytes();
+        let len = src.len().min(3);
+        let mut bytes = [0u8; 3];
+        bytes[..len].copy_from_slice(&src[..len]);
+        Self {
+            bytes,
+            len: len as u8,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Bytes were copied from a valid &str of ASCII element symbols.
+        std::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+}
+
+impl std::ops::Deref for Element {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Debug for Element {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl std::fmt::Display for Element {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for Element {
+    fn from(s: &str) -> Self {
+        Element::new(s)
+    }
+}
+
+/// Optional PDB-specific attributes. Boxed behind `Atom::meta` so a minimal
+/// atom (MOL2, or any source without these fields) stays small and so the
+/// per-frame render loops iterate a tight `Atom` array instead of paying for
+/// seven mostly-empty `Option`s inline.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AtomMeta {
     pub name: Option<String>,     // Atom identifier (e.g., "CA", "C00")
     pub res_name: Option<String>, // Residue name (e.g., "ALA")
     pub chain_id: Option<char>,   // Chain identifier (e.g., 'A')
@@ -16,6 +72,45 @@ pub struct Atom {
     pub occupancy: Option<f32>,   // Occupancy factor (0.0-1.0)
     pub temp_factor: Option<f32>, // Temperature factor
     pub charge: Option<String>,   // Formal charge
+}
+
+#[derive(Debug, Clone)]
+pub struct Atom {
+    pub position: Vec3,
+    pub element: Element,
+    pub id: usize,
+    /// PDB-specific attributes, present only when a source provides them.
+    pub meta: Option<Box<AtomMeta>>,
+}
+
+impl Atom {
+    pub fn name(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.name.as_deref())
+    }
+
+    pub fn res_name(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.res_name.as_deref())
+    }
+
+    pub fn chain_id(&self) -> Option<char> {
+        self.meta.as_ref().and_then(|m| m.chain_id)
+    }
+
+    pub fn res_seq(&self) -> Option<i32> {
+        self.meta.as_ref().and_then(|m| m.res_seq)
+    }
+
+    pub fn occupancy(&self) -> Option<f32> {
+        self.meta.as_ref().and_then(|m| m.occupancy)
+    }
+
+    pub fn temp_factor(&self) -> Option<f32> {
+        self.meta.as_ref().and_then(|m| m.temp_factor)
+    }
+
+    pub fn charge(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.charge.as_deref())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -185,15 +280,9 @@ impl Molecule {
                                     y * ANGSTROM_TO_NANOMETER,
                                     z * ANGSTROM_TO_NANOMETER,
                                 ),
-                                element,
+                                element: Element::new(&element),
                                 id: atoms.len() + 1,
-                                name: None,
-                                res_name: None,
-                                chain_id: None,
-                                res_seq: None,
-                                occupancy: None,
-                                temp_factor: None,
-                                charge: None,
+                                meta: None,
                             });
                         }
                     }
@@ -288,31 +377,33 @@ impl Molecule {
                     record.y * ANGSTROM_TO_NANOMETER,
                     record.z * ANGSTROM_TO_NANOMETER,
                 ),
-                element: extract_element_symbol(&record.element, &record.name),
+                element: Element::new(&extract_element_symbol(&record.element, &record.name)),
                 id: idx,
-                name: Some(record.name.clone()),
-                res_name: Some(record.res_name.clone()),
-                chain_id: if record.chain_id != ' ' {
-                    Some(record.chain_id)
-                } else {
-                    None
-                },
-                res_seq: Some(record.res_seq),
-                occupancy: if record.occupancy > 0.0 {
-                    Some(record.occupancy)
-                } else {
-                    None
-                },
-                temp_factor: if record.temp_factor > 0.0 {
-                    Some(record.temp_factor)
-                } else {
-                    None
-                },
-                charge: if !record.charge.is_empty() {
-                    Some(record.charge.clone())
-                } else {
-                    None
-                },
+                meta: Some(Box::new(AtomMeta {
+                    name: Some(record.name.clone()),
+                    res_name: Some(record.res_name.clone()),
+                    chain_id: if record.chain_id != ' ' {
+                        Some(record.chain_id)
+                    } else {
+                        None
+                    },
+                    res_seq: Some(record.res_seq),
+                    occupancy: if record.occupancy > 0.0 {
+                        Some(record.occupancy)
+                    } else {
+                        None
+                    },
+                    temp_factor: if record.temp_factor > 0.0 {
+                        Some(record.temp_factor)
+                    } else {
+                        None
+                    },
+                    charge: if !record.charge.is_empty() {
+                        Some(record.charge.clone())
+                    } else {
+                        None
+                    },
+                })),
             })
             .collect();
 
@@ -460,15 +551,9 @@ mod tests {
     fn atom_at(element: &str, x: f32, y: f32, z: f32) -> Atom {
         Atom {
             position: Vec3::new(x, y, z),
-            element: element.to_string(),
+            element: Element::new(element),
             id: 0,
-            name: None,
-            res_name: None,
-            chain_id: None,
-            res_seq: None,
-            occupancy: None,
-            temp_factor: None,
-            charge: None,
+            meta: None,
         }
     }
 

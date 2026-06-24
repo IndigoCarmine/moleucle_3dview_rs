@@ -9,13 +9,13 @@ fn test_atom_extended_fields_mol2() {
 
     // MOL2 atoms should have None for PDB-specific fields
     for atom in &mol.atoms {
-        assert!(atom.name.is_none(), "MOL2 atoms should not have name");
-        assert!(atom.res_name.is_none(), "MOL2 atoms should not have res_name");
-        assert!(atom.chain_id.is_none(), "MOL2 atoms should not have chain_id");
-        assert!(atom.res_seq.is_none(), "MOL2 atoms should not have res_seq");
-        assert!(atom.occupancy.is_none(), "MOL2 atoms should not have occupancy");
-        assert!(atom.temp_factor.is_none(), "MOL2 atoms should not have temp_factor");
-        assert!(atom.charge.is_none(), "MOL2 atoms should not have charge");
+        assert!(atom.name().is_none(), "MOL2 atoms should not have name");
+        assert!(atom.res_name().is_none(), "MOL2 atoms should not have res_name");
+        assert!(atom.chain_id().is_none(), "MOL2 atoms should not have chain_id");
+        assert!(atom.res_seq().is_none(), "MOL2 atoms should not have res_seq");
+        assert!(atom.occupancy().is_none(), "MOL2 atoms should not have occupancy");
+        assert!(atom.temp_factor().is_none(), "MOL2 atoms should not have temp_factor");
+        assert!(atom.charge().is_none(), "MOL2 atoms should not have charge");
     }
 }
 
@@ -27,16 +27,16 @@ fn test_atom_extended_fields_pdb() {
     // PDB atoms should have Some values for extended fields
     for atom in &mol.atoms {
         assert!(
-            atom.name.is_some(),
+            atom.name().is_some(),
             "PDB atoms should have name (e.g., C00, H0C)"
         );
         assert!(
-            atom.res_name.is_some(),
+            atom.res_name().is_some(),
             "PDB atoms should have res_name (e.g., ENAP)"
         );
         // Note: chain_id might be None if it's a space character
         assert!(
-            atom.res_seq.is_some(),
+            atom.res_seq().is_some(),
             "PDB atoms should have res_seq (e.g., 1)"
         );
         // occupancy and temp_factor might be None if 0.0
@@ -52,7 +52,7 @@ fn test_atom_pdb_name_field() {
     // First atom should be "C00"
     let first_atom = &mol.atoms[0];
     assert_eq!(
-        first_atom.name.as_deref(),
+        first_atom.name(),
         Some("C00"),
         "First atom in A.pdb should be C00"
     );
@@ -65,7 +65,7 @@ fn test_atom_pdb_residue_info() {
 
     // Check residue information consistency
     for atom in &mol.atoms {
-        if let Some(res_name) = &atom.res_name {
+        if let Some(res_name) = atom.res_name() {
             // A.pdb contains ENAP or ENA residues (PDB parsing may trim differently)
             assert!(
                 res_name == "ENAP" || res_name == "ENA",
@@ -74,7 +74,7 @@ fn test_atom_pdb_residue_info() {
             );
         }
 
-        if let Some(res_seq) = atom.res_seq {
+        if let Some(res_seq) = atom.res_seq() {
             assert_eq!(res_seq, 1, "All atoms should have residue sequence 1");
         }
     }
@@ -92,12 +92,12 @@ fn test_atom_extended_structure() {
     assert!(atom.position.x.is_finite());
     
     // Extended fields
-    assert!(atom.name.is_some());
-    assert!(atom.res_name.is_some());
-    assert!(atom.res_seq.is_some());
-    
+    assert!(atom.name().is_some());
+    assert!(atom.res_name().is_some());
+    assert!(atom.res_seq().is_some());
+
     println!(
         "Extended Atom: id={}, element={}, name={:?}, res={:?}, seq={:?}",
-        atom.id, atom.element, atom.name, atom.res_name, atom.res_seq
+        atom.id, atom.element, atom.name(), atom.res_name(), atom.res_seq()
     );
 }
