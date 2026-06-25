@@ -481,6 +481,95 @@ impl Molecule {
         })
     }
 
+    /// Load a molecule, dispatching on the file extension: `.gro` (GROMACS),
+    /// `.pdb`, or `.mol2`. Returns an error for unrecognized extensions.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("gro") => Self::from_gro(path),
+            Some("pdb") => Self::from_pdb(path),
+            Some("mol2") => Self::from_mol2(path),
+            other => Err(format!(
+                "unsupported molecule file extension: {:?}",
+                other.unwrap_or("<none>")
+            )),
+        }
+    }
+
+    /// Parse a GROMACS `.gro` coordinate file.
+    ///
+    /// GRO files store coordinates already in nanometers (the crate's native
+    /// unit) and carry no bond information, so bonds are left empty — at the
+    /// multi-million-atom scale typical of GRO systems, inferring bonds would be
+    /// prohibitively slow and memory-hungry. To keep memory flat for such large
+    /// systems, only positions and element are retained; per-atom residue/name
+    /// metadata is intentionally dropped (`Atom::meta` is `None`).
+    pub fn from_gro(path: &Path) -> Result<Self, String> {
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        Self::parse_gro(std::io::BufReader::new(file))
+    }
+
+    /// Core GRO parser, generic over the reader so it can be unit-tested without
+    /// a file. Reads line by line to avoid materializing the whole (potentially
+    /// hundreds-of-MB) file in memory at once.
+    fn parse_gro<R: std::io::BufRead>(mut reader: R) -> Result<Self, String> {
+        let mut line = String::new();
+
+        // Line 1: title (ignored).
+        if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            return Err("GRO file is empty".to_string());
+        }
+
+        // Line 2: atom count.
+        line.clear();
+        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        let count: usize = line
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid GRO atom count: {:?}", line.trim()))?;
+
+        let mut atoms = Vec::with_capacity(count);
+        for i in 0..count {
+            line.clear();
+            if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+                return Err(format!(
+                    "GRO ended early: expected {count} atoms, found {i}"
+                ));
+            }
+
+            // Fixed columns: [0,5) resid, [5,10) resname, [10,15) atom name,
+            // [15,20) atom serial. Coordinates follow column 20 and are
+            // whitespace-separated (already in nm). Names may run into the
+            // serial when fields overflow, so never split the first 20 columns
+            // on whitespace.
+            let name = line.get(10..15).map(str::trim).unwrap_or("");
+            let coords = line.get(20..).ok_or_else(|| {
+                format!("GRO atom line {} too short: {:?}", i + 1, line.trim_end())
+            })?;
+            let mut nums = coords.split_whitespace();
+            let x: f32 = parse_gro_coord(nums.next(), i)?;
+            let y: f32 = parse_gro_coord(nums.next(), i)?;
+            let z: f32 = parse_gro_coord(nums.next(), i)?;
+
+            atoms.push(Atom {
+                position: Vec3::new(x, y, z),
+                element: Element::new(&element_from_gro_name(name)),
+                id: i,
+                meta: None,
+            });
+        }
+
+        Ok(Molecule {
+            atoms,
+            bonds: Vec::new(),
+            generation: 0,
+        })
+    }
+
     /// Infer bonds based on van der Waals radii.
     ///
     /// Uses a uniform spatial grid so that each atom is only compared against
@@ -579,6 +668,39 @@ impl Molecule {
         }
 
         bonds
+    }
+}
+
+fn parse_gro_coord(field: Option<&str>, atom_index: usize) -> Result<f32, String> {
+    field
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("GRO atom {} has invalid coordinates", atom_index + 1))
+}
+
+/// Derive an element symbol from a GROMACS atom name (e.g. "C1" -> "C",
+/// "H14" -> "H", "CL2" -> "CL"). The element is the leading run of letters;
+/// only a recognized two-letter element keeps its second letter, so organic
+/// names like "C1"/"CA" stay single-letter carbon.
+fn element_from_gro_name(name: &str) -> String {
+    let letters: String = name
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_uppercase();
+
+    if letters.is_empty() {
+        return "?".to_string();
+    }
+
+    // Common two-letter elements that appear in MD systems.
+    const TWO_LETTER: &[&str] = &[
+        "CL", "BR", "NA", "MG", "CA", "FE", "ZN", "MN", "CU", "NI", "CO", "SI", "SE", "LI", "AL",
+        "BA", "SR", "CS", "RB", "KR", "AR", "NE", "HE",
+    ];
+    if letters.len() >= 2 && TWO_LETTER.contains(&&letters[..2]) {
+        letters[..2].to_string()
+    } else {
+        letters[..1].to_string()
     }
 }
 
@@ -726,6 +848,50 @@ mod tests {
         // Unchanged on error.
         assert_eq!(mol.generation(), 5);
         assert_eq!(mol.atoms[0].position, Vec3::new(0.0, 0.0, 0.0));
+    }
+
+    fn gro_line(resid: i32, resname: &str, name: &str, serial: i32, p: [f32; 3]) -> String {
+        format!(
+            "{:>5}{:<5}{:>5}{:>5}{:8.3}{:8.3}{:8.3}",
+            resid, resname, name, serial, p[0], p[1], p[2]
+        )
+    }
+
+    #[test]
+    fn parse_gro_reads_positions_and_elements() {
+        let content = format!(
+            "title line\n2\n{}\n{}\n   5.00000   5.00000   5.00000\n",
+            gro_line(1, "MOL", "C1", 1, [1.0, 2.0, 3.0]),
+            gro_line(2, "SOL", "OW", 2, [4.0, 5.0, 6.0]),
+        );
+
+        let mol = Molecule::parse_gro(std::io::Cursor::new(content)).unwrap();
+        assert_eq!(mol.atoms.len(), 2);
+        // GRO coordinates are already in nm — stored verbatim.
+        assert_eq!(mol.atoms[0].position, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(mol.atoms[1].position, Vec3::new(4.0, 5.0, 6.0));
+        assert_eq!(mol.atoms[0].element.as_str(), "C");
+        assert_eq!(mol.atoms[1].element.as_str(), "O");
+        // No bonds inferred, no per-atom metadata retained.
+        assert!(mol.bonds.is_empty());
+        assert!(mol.atoms[0].meta.is_none());
+    }
+
+    #[test]
+    fn parse_gro_handles_two_letter_element() {
+        let content = format!(
+            "t\n1\n{}\n   5.0   5.0   5.0\n",
+            gro_line(1, "ION", "CL", 1, [0.0, 0.0, 0.0]),
+        );
+        let mol = Molecule::parse_gro(std::io::Cursor::new(content)).unwrap();
+        assert_eq!(mol.atoms[0].element.as_str(), "CL");
+    }
+
+    #[test]
+    fn parse_gro_rejects_truncated_file() {
+        // Header promises 3 atoms but only one is present.
+        let content = format!("t\n3\n{}\n", gro_line(1, "MOL", "C1", 1, [0.0, 0.0, 0.0]));
+        assert!(Molecule::parse_gro(std::io::Cursor::new(content)).is_err());
     }
 
     #[test]

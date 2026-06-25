@@ -122,15 +122,27 @@ impl SimpleViewerApp {
 }
 
 fn load_default_molecule() -> Result<Molecule, String> {
-    let path = Path::new("A.pdb");
-    if !path.exists() {
-        return Err(format!(
-            "A.pdb not found at {:?}",
-            std::env::current_dir().map_err(|err| err.to_string())?
-        ));
-    }
+    // Allow `cargo run --example simple_viewer -- <file>`; otherwise prefer the
+    // sample GROMACS trajectory frame if present, then fall back to A.pdb.
+    let arg = std::env::args().nth(1);
+    let candidates: Vec<&str> = match arg.as_deref() {
+        Some(path) => vec![path],
+        None => vec!["output.gro", "A.pdb"],
+    };
 
-    Molecule::from_pdb(path).map_err(|err| format!("Failed to parse A.pdb: {err}"))
+    let path = candidates
+        .iter()
+        .map(Path::new)
+        .find(|p| p.exists())
+        .ok_or_else(|| {
+            format!(
+                "no molecule file found (tried {:?}) in {:?}",
+                candidates,
+                std::env::current_dir().unwrap_or_default()
+            )
+        })?;
+
+    Molecule::load(path).map_err(|err| format!("Failed to parse {}: {err}", path.display()))
 }
 
 impl eframe::App for SimpleViewerApp {

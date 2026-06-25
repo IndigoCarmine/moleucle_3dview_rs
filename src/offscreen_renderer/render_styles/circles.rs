@@ -2,7 +2,7 @@ use crate::atom_radii::vdw_radius;
 use crate::viewer::ColorFn;
 use crate::{Atom, Molecule};
 
-use super::super::MAX_RENDER_VERTICES;
+use super::super::SAFE_MAX_VERTEX_BUFFER_BYTES;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -13,9 +13,14 @@ pub(crate) struct CircleInstance {
     pub(crate) _pad: f32,
 }
 
-/// The impostor pipeline draws each atom as a 6-vertex billboard quad, so the
-/// instance budget is the vertex budget divided by 6.
-pub(crate) const MAX_IMPOSTOR_INSTANCES: usize = MAX_RENDER_VERTICES / 6;
+/// Maximum impostor instances per buffer. Each instance is a small packed
+/// struct (not 6 mesh vertices), so the budget is the buffer byte limit
+/// divided by the instance size — far more than the old vertex/6 cap, which is
+/// what lets multi-million-atom systems (e.g. a 5.4M-atom GROMACS frame) render
+/// without dropping atoms. The 240 MB budget keeps the buffer under the common
+/// 256 MB GPU per-buffer limit.
+pub(crate) const MAX_IMPOSTOR_INSTANCES: usize =
+    SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<CircleInstance>();
 
 /// Fill `out` with one sphere-impostor instance per atom, using `radius_for` to
 /// size each sphere. `out` is cleared first and its capacity is reused, so
