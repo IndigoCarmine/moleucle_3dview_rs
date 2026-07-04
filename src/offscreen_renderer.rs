@@ -110,7 +110,7 @@ pub enum RenderStyle {
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
-    color: [f32; 3],
+    color: [f32; 4],
 }
 
 #[repr(C)]
@@ -137,8 +137,7 @@ struct BondInstance {
     radius: f32,
     axis: [f32; 3],
     length: f32,
-    color: [f32; 3],
-    _pad: f32,
+    color: [f32; 4],
 }
 
 #[repr(C)]
@@ -754,7 +753,7 @@ impl OffscreenRenderer {
         };
 
         let radius = default_ball_stick_bond_radius();
-        let color = [0.55, 0.55, 0.55];
+        let color = [0.55, 0.55, 0.55, 1.0];
         out.reserve(mol.bonds.len().min(MAX_IMPOSTOR_INSTANCES));
 
         for bond in &mol.bonds {
@@ -776,7 +775,6 @@ impl OffscreenRenderer {
                 axis: [axis.x, axis.y, axis.z],
                 length: len,
                 color,
-                _pad: 0.0,
             });
         }
     }
@@ -836,7 +834,14 @@ impl OffscreenRenderer {
                 entity
                     .scale_partial
                     .unwrap_or(Vec3::new(entity.scale, entity.scale, entity.scale));
-            let color = [entity.color.0, entity.color.1, entity.color.2];
+            // Fold the entity's opacity into the color's alpha channel so both
+            // per-color alpha and the entity-wide opacity affect blending.
+            let color = [
+                entity.color.0,
+                entity.color.1,
+                entity.color.2,
+                entity.color.3 * entity.opacity,
+            ];
 
             for tri in mesh.indices.chunks_exact(3) {
                 if vertices.len().saturating_add(3) > max_vertices {
@@ -894,7 +899,7 @@ fn append_mesh_triangles(
     position: lin_alg::f32::Vec3,
     orientation: lin_alg::f32::Quaternion,
     scale: lin_alg::f32::Vec3,
-    color: [f32; 3],
+    color: [f32; 4],
     max_vertices: usize,
 ) -> bool {
     let inv_scale = lin_alg::f32::Vec3::new(
@@ -1047,7 +1052,7 @@ fn append_line(
     out: &mut Vec<Vertex>,
     a: lin_alg::f32::Vec3,
     b: lin_alg::f32::Vec3,
-    color: [f32; 3],
+    color: [f32; 4],
     max_vertices: usize,
 ) -> bool {
     if out.len().saturating_add(2) > max_vertices {

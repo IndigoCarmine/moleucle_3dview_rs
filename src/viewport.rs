@@ -22,7 +22,7 @@ fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortE
             get_state_clone_by_type::<SelectedAtomRenderState>(&viewport.shared_states)
                 .unwrap_or_else(|| SelectedAtomRenderState {
                     selected_atoms: Vec::new(),
-                    color: [1.0, 0.0, 0.0],
+                    color: [1.0, 0.0, 0.0, 1.0],
                 });
         if let Some(_) = selected
             .selected_atoms

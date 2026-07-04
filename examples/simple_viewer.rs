@@ -38,9 +38,9 @@ impl AdditionalRender for ExampleStateRender {
 
         // draw a small sphere whose color depends on count
         let color = match count % 3 {
-            0 => (1.0, 0.0, 0.0),
-            1 => (0.0, 1.0, 0.0),
-            _ => (0.0, 0.0, 1.0),
+            0 => (1.0, 0.0, 0.0, 1.0),
+            1 => (0.0, 1.0, 0.0, 1.0),
+            _ => (0.0, 0.0, 1.0, 1.0),
         };
 
         // place sphere at top-left of scene for demo
@@ -73,7 +73,7 @@ impl SimpleViewerApp {
             }
             viewport.set_state_by_type(SelectedAtomRenderState {
                 selected_atoms: selected.clone(),
-                color: [1.0, 0.0, 0.0],
+                color: [1.0, 0.0, 0.0, 1.0],
             });
         }
         if let ViewPortEvent::hovered { atom } = event {

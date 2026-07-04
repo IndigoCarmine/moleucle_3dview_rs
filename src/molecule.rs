@@ -287,6 +287,46 @@ impl Molecule {
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
+
+    /// Build a molecule directly from in-memory atoms and bonds (generation 0).
+    ///
+    /// The file loaders (`from_mol2`/`from_pdb`/`from_gro`) are the usual entry
+    /// points, but callers that synthesize geometry programmatically — e.g. a
+    /// node-graph builder assembling atoms from its own model — need a way to
+    /// construct a `Molecule` without round-tripping through a file. Positions
+    /// are taken as-is (the crate's nanometer convention); `bonds` may be empty.
+    pub fn from_atoms_bonds(atoms: Vec<Atom>, bonds: Vec<Bond>) -> Self {
+        Self {
+            atoms,
+            bonds,
+            generation: 0,
+        }
+    }
+
+    /// Like [`from_atoms_bonds`](Self::from_atoms_bonds) but infers bonds from
+    /// interatomic distance (covalent-ish cutoff, in nanometers) when the caller
+    /// has no explicit connectivity — handy for display of geometry built by a
+    /// pipeline that doesn't track bonds. `cutoff` is the maximum bonded
+    /// distance; pairs closer than that (and not the same atom) get a single bond.
+    pub fn from_atoms_inferred_bonds(atoms: Vec<Atom>, cutoff: f32) -> Self {
+        let cutoff_sq = cutoff * cutoff;
+        let mut bonds = Vec::new();
+        for i in 0..atoms.len() {
+            for j in (i + 1)..atoms.len() {
+                let d = atoms[i].position - atoms[j].position;
+                let dist_sq = d.magnitude_squared();
+                // Guard against coincident atoms producing spurious zero-length bonds.
+                if dist_sq > 1e-8 && dist_sq < cutoff_sq {
+                    bonds.push(Bond {
+                        atom_a: i,
+                        atom_b: j,
+                        order: 1,
+                    });
+                }
+            }
+        }
+        Self::from_atoms_bonds(atoms, bonds)
+    }
 }
 
 impl Molecule {

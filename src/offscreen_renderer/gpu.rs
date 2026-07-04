@@ -145,7 +145,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
                         shader_location: 1,
                     },
                     wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
+                        format: wgpu::VertexFormat::Float32x4,
                         offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
                         shader_location: 2,
                     },
@@ -158,7 +158,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -268,7 +268,7 @@ fn create_triangle_pipeline(
                         shader_location: 1,
                     },
                     wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
+                        format: wgpu::VertexFormat::Float32x4,
                         offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
                         shader_location: 2,
                     },
@@ -281,7 +281,7 @@ fn create_triangle_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -345,7 +345,7 @@ fn create_circles_pipeline(
                             shader_location: 2,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
+                            format: wgpu::VertexFormat::Float32x4,
                             offset: std::mem::size_of::<[f32; 4]>() as u64,
                             shader_location: 3,
                         },
@@ -442,7 +442,7 @@ fn create_bond_pipeline(
                             shader_location: 5,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
+                            format: wgpu::VertexFormat::Float32x4,
                             offset: std::mem::size_of::<[f32; 8]>() as u64,
                             shader_location: 6,
                         },
@@ -456,7 +456,7 @@ fn create_bond_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -484,7 +484,7 @@ fn create_bond_pipeline(
 const MESH_SHADER: &str = r#"
 struct VSOut {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) depth01: f32,
 };
@@ -506,7 +506,7 @@ var<uniform> uniforms: Uniforms;
 fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(2) color: vec4<f32>,
 ) -> VSOut {
     var out: VSOut;
     let clip = uniforms.view_proj * vec4<f32>(position, 1.0);
@@ -519,20 +519,21 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let base = in.color.rgb;
     let n = normalize(in.normal);
     let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
     let diffuse = max(dot(n, l), 0.0);
     let ambient = 0.22;
-    let standard_lit = in.color * (ambient + 0.78 * diffuse);
+    let standard_lit = base * (ambient + 0.78 * diffuse);
 
     // For deeper fragments, blend toward a sphere-like radial tone.
     let depth01 = clamp(in.depth01, 0.0, 1.0);
     let deep_factor = smoothstep(0.60, 0.98, depth01);
     let radial = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
 
-    let core = in.color * 1.05 + vec3<f32>(0.10, 0.10, 0.10);
-    let mid = in.color;
-    let edge = in.color * 0.28;
+    let core = base * 1.05 + vec3<f32>(0.10, 0.10, 0.10);
+    let mid = base;
+    let edge = base * 0.28;
     let center_mix = smoothstep(0.55, 1.0, radial);
     let radial_mix = smoothstep(0.05, 0.85, radial);
     var sphere_tone = mix(edge, mix(mid, core, center_mix), radial_mix);
@@ -542,14 +543,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     sphere_tone = sphere_tone * rim;
 
     let lit = mix(standard_lit, sphere_tone, deep_factor);
-    return vec4<f32>(lit, 1.0);
+    return vec4<f32>(lit, in.color.a);
 }
 "#;
 
 const WIRE_SHADER: &str = r#"
 struct VSOut {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>,
 };
 
 struct Uniforms {
@@ -569,7 +570,7 @@ var<uniform> uniforms: Uniforms;
 fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) _normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(2) color: vec4<f32>,
 ) -> VSOut {
     var out: VSOut;
     out.position = uniforms.view_proj * vec4<f32>(position, 1.0);
@@ -579,7 +580,7 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    return in.color;
 }
 "#;
 
@@ -604,7 +605,7 @@ struct VSOut {
     @location(0) center: vec3<f32>,
 
     @location(1) radius: f32,
-    @location(2) color: vec3<f32>,
+    @location(2) color: vec4<f32>,
     @location(3) local: vec2<f32>,
 };
 
@@ -618,7 +619,7 @@ fn vs_main(
     @location(0) corner: vec2<f32>,
     @location(1) center: vec3<f32>,
     @location(2) radius: f32,
-    @location(3) color: vec3<f32>,
+    @location(3) color: vec4<f32>,
 ) -> VSOut {
     var out: VSOut;
 
@@ -714,9 +715,9 @@ fn fs_main(in: VSOut) -> FSOut {
     let ambient = 0.15;
 
     let lit =
-        in.color * (ambient + diffuse * 0.85);
+        in.color.rgb * (ambient + diffuse * 0.85);
 
-    out.color = vec4<f32>(lit, 1.0);
+    out.color = vec4<f32>(lit, in.color.a);
 
     return out;
 }
@@ -738,7 +739,7 @@ var<uniform> uniforms: Uniforms;
 
 struct VSOut {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>,
     @location(1) normal: vec3<f32>,
 };
 
@@ -750,7 +751,7 @@ fn vs_main(
     @location(3) radius: f32,
     @location(4) axis: vec3<f32>,
     @location(5) length: f32,
-    @location(6) color: vec3<f32>,
+    @location(6) color: vec4<f32>,
 ) -> VSOut {
     // Orthonormal basis perpendicular to the (unit) cylinder axis.
     var up = vec3<f32>(0.0, 1.0, 0.0);
@@ -784,7 +785,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
     let diffuse = max(dot(n, l), 0.0);
     let ambient = 0.25;
-    return vec4<f32>(in.color * (ambient + 0.75 * diffuse), 1.0);
+    return vec4<f32>(in.color.rgb * (ambient + 0.75 * diffuse), in.color.a);
 }
 "#;
 
