@@ -9,8 +9,8 @@ use super::super::SAFE_MAX_VERTEX_BUFFER_BYTES;
 pub(crate) struct CircleInstance {
     pub(crate) center: [f32; 3],
     pub(crate) radius: f32,
-    pub(crate) color: [f32; 3],
-    pub(crate) _pad: f32,
+    /// RGBA color; the alpha component drives alpha blending in the shader.
+    pub(crate) color: [f32; 4],
 }
 
 /// Maximum impostor instances per buffer. Each instance is a small packed
@@ -47,8 +47,7 @@ pub(crate) fn fill_sphere_instances(
         out.push(CircleInstance {
             center: [atom.position.x, atom.position.y, atom.position.z],
             radius: radius_for(atom),
-            color: [color_tuple.0, color_tuple.1, color_tuple.2],
-            _pad: 0.0,
+            color: [color_tuple.0, color_tuple.1, color_tuple.2, color_tuple.3],
         });
     }
 }

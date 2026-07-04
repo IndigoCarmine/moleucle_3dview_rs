@@ -59,7 +59,7 @@ impl MolecularRenderStyle for WireframeStyle {
                         &mut vertices,
                         a + off,
                         b + off,
-                        [0.70, 0.70, 0.72],
+                        [0.70, 0.70, 0.72, 1.0],
                         max_vertices,
                     ) {
                         break 'bonds;
@@ -71,7 +71,7 @@ impl MolecularRenderStyle for WireframeStyle {
                 let pos = atom.position;
                 let span = 0.02;
                 let color_tuple = color_fn(atom, false);
-                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
+                let color = [color_tuple.0, color_tuple.1, color_tuple.2, color_tuple.3];
 
                 if !append_line(
                     &mut vertices,
@@ -108,21 +108,21 @@ impl MolecularRenderStyle for WireframeStyle {
             &mut vertices,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(axis_len, 0.0, 0.0),
-            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0],
             max_vertices,
         );
         let _ = append_line(
             &mut vertices,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.0, axis_len, 0.0),
-            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 1.0],
             max_vertices,
         );
         let _ = append_line(
             &mut vertices,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.0, 0.0, axis_len),
-            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
             max_vertices,
         );
 

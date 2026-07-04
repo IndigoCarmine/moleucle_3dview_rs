@@ -115,7 +115,7 @@ pub(super) fn build_ballstick_vertices(
                             &mut vertices,
                             a + lateral * offset,
                             b + lateral * offset,
-                            [0.55, 0.55, 0.55],
+                            [0.55, 0.55, 0.55, 1.0],
                             max_vertices,
                         ) {
                             break 'bonds;
@@ -126,7 +126,7 @@ pub(super) fn build_ballstick_vertices(
                         mid + lateral * offset,
                         orientation,
                         Vec3::new(base_radius, len, base_radius),
-                        [0.55, 0.55, 0.55],
+                        [0.55, 0.55, 0.55, 1.0],
                         max_vertices,
                     ) {
                         break 'bonds;
@@ -139,7 +139,7 @@ pub(super) fn build_ballstick_vertices(
             let pos = atom.position;
             let radius = ball_stick_radius(&atom.element, false);
             let color_tuple = color_fn(atom, false);
-            let color = [color_tuple.0, color_tuple.1, color_tuple.2];
+            let color = [color_tuple.0, color_tuple.1, color_tuple.2, color_tuple.3];
 
             if !append_mesh_triangles(
                 &mut vertices,
@@ -163,21 +163,21 @@ pub(super) fn build_ballstick_vertices(
                 &mut vertices,
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(axis_len, 0.0, 0.0),
-                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
                 max_vertices,
             );
             let _ = append_line(
                 &mut vertices,
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(0.0, axis_len, 0.0),
-                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0, 1.0],
                 max_vertices,
             );
             let _ = append_line(
                 &mut vertices,
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(0.0, 0.0, axis_len),
-                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
                 max_vertices,
             );
         } else {
@@ -187,7 +187,7 @@ pub(super) fn build_ballstick_vertices(
                 Vec3::new(axis_len * 0.5, 0.0, 0.0),
                 Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
                 Vec3::new(axis_radius, axis_len, axis_radius),
-                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
                 max_vertices,
             );
             let _ = append_mesh_triangles(
@@ -196,7 +196,7 @@ pub(super) fn build_ballstick_vertices(
                 Vec3::new(0.0, axis_len * 0.5, 0.0),
                 Quaternion::new_identity(),
                 Vec3::new(axis_radius, axis_len, axis_radius),
-                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0, 1.0],
                 max_vertices,
             );
             let _ = append_mesh_triangles(
@@ -205,7 +205,7 @@ pub(super) fn build_ballstick_vertices(
                 Vec3::new(0.0, 0.0, axis_len * 0.5),
                 Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
                 Vec3::new(axis_radius, axis_len, axis_radius),
-                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
                 max_vertices,
             );
         }
