@@ -17,11 +17,12 @@ impl MolecularRenderStyle for WireframeStyle {
 
     fn build_vertices(
         &self,
-        _context: &StyleBuildContext<'_>,
+        context: &StyleBuildContext<'_>,
         molecule: Option<&Molecule>,
         color_fn: ColorFn,
     ) -> Vec<Vertex> {
         let max_vertices = MAX_RENDER_VERTICES;
+        let opacity = context.molecule_opacity;
         let mut vertices = if let Some(mol) = molecule {
             let capacity = mol
                 .bonds
@@ -59,7 +60,7 @@ impl MolecularRenderStyle for WireframeStyle {
                         &mut vertices,
                         a + off,
                         b + off,
-                        [0.70, 0.70, 0.72, 1.0],
+                        [0.70, 0.70, 0.72, opacity],
                         max_vertices,
                     ) {
                         break 'bonds;
@@ -71,7 +72,12 @@ impl MolecularRenderStyle for WireframeStyle {
                 let pos = atom.position;
                 let span = 0.02;
                 let color_tuple = color_fn(atom, false);
-                let color = [color_tuple.0, color_tuple.1, color_tuple.2, color_tuple.3];
+                let color = [
+                    color_tuple.0,
+                    color_tuple.1,
+                    color_tuple.2,
+                    color_tuple.3 * opacity,
+                ];
 
                 if !append_line(
                     &mut vertices,

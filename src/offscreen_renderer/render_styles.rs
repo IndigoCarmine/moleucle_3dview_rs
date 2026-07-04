@@ -12,6 +12,8 @@ pub(super) struct StyleBuildContext<'a> {
     pub(super) preference: OffscreenRendererPreference,
     pub(super) sphere_mesh: &'a RenderMesh,
     pub(super) cylinder_mesh: &'a RenderMesh,
+    /// Whole-molecule opacity in `0.0..=1.0`, folded into atom/bond alpha.
+    pub(super) molecule_opacity: f32,
 }
 
 pub(super) trait MolecularRenderStyle {

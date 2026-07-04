@@ -17,9 +17,14 @@ pub struct RenderFrameState<'a> {
     pub render_style: RenderStyle,
     pub mesh_resolution: usize,
     pub is_low_mode: bool,
+    /// Opacity applied to the whole main molecule (atoms + bonds) in
+    /// `0.0..=1.0`. Folded into each geometry color's alpha channel so the
+    /// molecule can be faded without changing its `color_fn`. `1.0` is opaque.
+    pub molecule_opacity: f32,
 }
 
 impl<'a> RenderFrameState<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         molecule: Option<&'a Molecule>,
         view_proj: [f32; 16],
@@ -33,6 +38,7 @@ impl<'a> RenderFrameState<'a> {
         render_style: RenderStyle,
         mesh_resolution: usize,
         is_low_mode: bool,
+        molecule_opacity: f32,
     ) -> Self {
         Self {
             molecule,
@@ -47,6 +53,7 @@ impl<'a> RenderFrameState<'a> {
             render_style,
             mesh_resolution,
             is_low_mode,
+            molecule_opacity,
         }
     }
 }

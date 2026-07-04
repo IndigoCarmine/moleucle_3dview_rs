@@ -30,6 +30,7 @@ pub(crate) fn fill_sphere_instances(
     out: &mut Vec<CircleInstance>,
     molecule: Option<&Molecule>,
     color_fn: ColorFn,
+    molecule_opacity: f32,
     radius_for: impl Fn(&Atom) -> f32,
 ) {
     out.clear();
@@ -47,7 +48,12 @@ pub(crate) fn fill_sphere_instances(
         out.push(CircleInstance {
             center: [atom.position.x, atom.position.y, atom.position.z],
             radius: radius_for(atom),
-            color: [color_tuple.0, color_tuple.1, color_tuple.2, color_tuple.3],
+            color: [
+                color_tuple.0,
+                color_tuple.1,
+                color_tuple.2,
+                color_tuple.3 * molecule_opacity,
+            ],
         });
     }
 }
@@ -56,9 +62,10 @@ pub(crate) fn fill_circle_instances(
     out: &mut Vec<CircleInstance>,
     molecule: Option<&Molecule>,
     color_fn: ColorFn,
+    molecule_opacity: f32,
 ) {
     // Scale down for better visibility in the circles style.
-    fill_sphere_instances(out, molecule, color_fn, |atom| {
+    fill_sphere_instances(out, molecule, color_fn, molecule_opacity, |atom| {
         vdw_radius(&atom.element) * 0.5
     })
 }

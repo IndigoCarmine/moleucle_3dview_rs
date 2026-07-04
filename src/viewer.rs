@@ -36,6 +36,9 @@ pub struct MoleculeViewer {
     pub dirty: bool,
     pub additional_render: Vec<Box<dyn AdditionalRender>>,
     pub color_fn: ColorFn,
+    /// Opacity of the whole molecule (atoms + bonds) in `0.0..=1.0`, folded into
+    /// each geometry color's alpha at render time. `1.0` is fully opaque.
+    pub molecule_opacity: f32,
 }
 
 impl MoleculeViewer {
@@ -45,6 +48,7 @@ impl MoleculeViewer {
             dirty: false,
             additional_render: Vec::new(),
             color_fn: default_color_fn,
+            molecule_opacity: 1.0,
         }
     }
 
@@ -55,12 +59,19 @@ impl MoleculeViewer {
             dirty: false,
             additional_render: Vec::new(),
             color_fn,
+            molecule_opacity: 1.0,
         }
     }
 
     /// Set the color function
     pub fn set_color_fn(&mut self, color_fn: ColorFn) {
         self.color_fn = color_fn;
+        self.dirty = true;
+    }
+
+    /// Set the whole-molecule opacity (clamped to `0.0..=1.0`). `1.0` is opaque.
+    pub fn set_molecule_opacity(&mut self, opacity: f32) {
+        self.molecule_opacity = opacity.clamp(0.0, 1.0);
         self.dirty = true;
     }
 
