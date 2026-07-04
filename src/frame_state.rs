@@ -21,6 +21,15 @@ pub struct RenderFrameState<'a> {
     /// `0.0..=1.0`. Folded into each geometry color's alpha channel so the
     /// molecule can be faded without changing its `color_fn`. `1.0` is opaque.
     pub molecule_opacity: f32,
+    /// Optional per-atom sphere radius override, indexed by atom order. When
+    /// present, entry `i` replaces the element-derived radius for atom `i`;
+    /// indices past the end fall back to the element default. Lets callers draw
+    /// e.g. coarse-grained beads through the built-in molecule pipeline.
+    pub atom_radii: Option<&'a [f32]>,
+    /// Optional per-atom RGBA color override, indexed by atom order. When
+    /// present, entry `i` replaces `color_fn`'s result for atom `i` (indices
+    /// past the end fall back to `color_fn`). `molecule_opacity` still applies.
+    pub atom_colors: Option<&'a [[f32; 4]]>,
 }
 
 impl<'a> RenderFrameState<'a> {
@@ -54,6 +63,19 @@ impl<'a> RenderFrameState<'a> {
             mesh_resolution,
             is_low_mode,
             molecule_opacity,
+            atom_radii: None,
+            atom_colors: None,
         }
+    }
+
+    /// Attach optional per-atom radius / color overrides (see the field docs).
+    pub fn with_atom_attrs(
+        mut self,
+        atom_radii: Option<&'a [f32]>,
+        atom_colors: Option<&'a [[f32; 4]]>,
+    ) -> Self {
+        self.atom_radii = atom_radii;
+        self.atom_colors = atom_colors;
+        self
     }
 }

@@ -68,16 +68,18 @@ impl MolecularRenderStyle for WireframeStyle {
                 }
             }
 
-            'atoms: for atom in &mol.atoms {
+            'atoms: for (i, atom) in mol.atoms.iter().enumerate() {
                 let pos = atom.position;
                 let span = 0.02;
-                let color_tuple = color_fn(atom, false);
-                let color = [
-                    color_tuple.0,
-                    color_tuple.1,
-                    color_tuple.2,
-                    color_tuple.3 * opacity,
-                ];
+                // Per-atom color override when supplied, else the color function.
+                let base = context
+                    .atom_colors
+                    .and_then(|c| c.get(i).copied())
+                    .unwrap_or_else(|| {
+                        let c = color_fn(atom, false);
+                        [c.0, c.1, c.2, c.3]
+                    });
+                let color = [base[0], base[1], base[2], base[3] * opacity];
 
                 if !append_line(
                     &mut vertices,

@@ -26,11 +26,14 @@ pub(crate) const MAX_IMPOSTOR_INSTANCES: usize =
 /// size each sphere. `out` is cleared first and its capacity is reused, so
 /// trajectory playback rebuilds instances without per-frame allocation. Shared
 /// by the `Circles` style and the large-molecule auto-fallback.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_sphere_instances(
     out: &mut Vec<CircleInstance>,
     molecule: Option<&Molecule>,
     color_fn: ColorFn,
     molecule_opacity: f32,
+    atom_radii: Option<&[f32]>,
+    atom_colors: Option<&[[f32; 4]]>,
     radius_for: impl Fn(&Atom) -> f32,
 ) {
     out.clear();
@@ -39,21 +42,24 @@ pub(crate) fn fill_sphere_instances(
     };
     out.reserve(mol.atoms.len().min(MAX_IMPOSTOR_INSTANCES));
 
-    for atom in &mol.atoms {
+    for (i, atom) in mol.atoms.iter().enumerate() {
         if out.len() >= MAX_IMPOSTOR_INSTANCES {
             break;
         }
 
-        let color_tuple = color_fn(atom, false);
+        // Per-atom radius override (e.g. CG beads), else the style's default.
+        let radius = atom_radii
+            .and_then(|r| r.get(i).copied())
+            .unwrap_or_else(|| radius_for(atom));
+        // Per-atom color override, else the color function.
+        let base = atom_colors.and_then(|c| c.get(i).copied()).unwrap_or_else(|| {
+            let c = color_fn(atom, false);
+            [c.0, c.1, c.2, c.3]
+        });
         out.push(CircleInstance {
             center: [atom.position.x, atom.position.y, atom.position.z],
-            radius: radius_for(atom),
-            color: [
-                color_tuple.0,
-                color_tuple.1,
-                color_tuple.2,
-                color_tuple.3 * molecule_opacity,
-            ],
+            radius,
+            color: [base[0], base[1], base[2], base[3] * molecule_opacity],
         });
     }
 }
@@ -63,9 +69,17 @@ pub(crate) fn fill_circle_instances(
     molecule: Option<&Molecule>,
     color_fn: ColorFn,
     molecule_opacity: f32,
+    atom_radii: Option<&[f32]>,
+    atom_colors: Option<&[[f32; 4]]>,
 ) {
     // Scale down for better visibility in the circles style.
-    fill_sphere_instances(out, molecule, color_fn, molecule_opacity, |atom| {
-        vdw_radius(&atom.element) * 0.5
-    })
+    fill_sphere_instances(
+        out,
+        molecule,
+        color_fn,
+        molecule_opacity,
+        atom_radii,
+        atom_colors,
+        |atom| vdw_radius(&atom.element) * 0.5,
+    )
 }

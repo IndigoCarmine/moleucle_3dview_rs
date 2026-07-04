@@ -162,6 +162,14 @@ struct GeometryCacheKey {
     render_style: RenderStyle,
     color_fn_ptr: usize,
     mesh_resolution: usize,
+    /// Molecule opacity as raw bits (f32 isn't `Eq`); changing it must rebuild
+    /// the baked-in vertex/instance alpha.
+    molecule_opacity_bits: u32,
+    /// Identity (pointer + length) of the per-atom radius / color overrides, so
+    /// swapping or clearing them rebuilds the geometry. Matches the pointer-based
+    /// invalidation already used for `molecule_ptr`.
+    atom_radii_id: (usize, usize),
+    atom_colors_id: (usize, usize),
 }
 
 pub struct OffscreenRenderer {
@@ -388,7 +396,7 @@ impl OffscreenRenderer {
             Some(style_for(render_style))
         };
 
-        let cache_key = self.build_geometry_cache_key(frame.molecule, frame.color_fn);
+        let cache_key = self.build_geometry_cache_key(frame);
         let rebuilt_vertices = if !use_impostors && self.geometry_cache_key != Some(cache_key) {
             if let Some(active_style) = style {
                 let ctx = StyleBuildContext {
@@ -396,6 +404,8 @@ impl OffscreenRenderer {
                     sphere_mesh: &self.sphere_mesh,
                     cylinder_mesh: &self.cylinder_mesh,
                     molecule_opacity: frame.molecule_opacity,
+                    atom_radii: frame.atom_radii,
+                    atom_colors: frame.atom_colors,
                 };
                 Some(active_style.build_vertices(&ctx, frame.molecule, frame.color_fn))
             } else {
@@ -790,39 +800,58 @@ impl OffscreenRenderer {
         frame: &RenderFrameState<'_>,
     ) {
         let opacity = frame.molecule_opacity;
+        let radii = frame.atom_radii;
+        let colors = frame.atom_colors;
         match render_style {
             RenderStyle::Circles => {
-                fill_circle_instances(out, frame.molecule, frame.color_fn, opacity)
+                fill_circle_instances(out, frame.molecule, frame.color_fn, opacity, radii, colors)
             }
             RenderStyle::BallOnly => {
-                fill_sphere_instances(out, frame.molecule, frame.color_fn, opacity, |atom| {
-                    vdw_radius(&atom.element)
-                })
+                fill_sphere_instances(
+                    out,
+                    frame.molecule,
+                    frame.color_fn,
+                    opacity,
+                    radii,
+                    colors,
+                    |atom| vdw_radius(&atom.element),
+                )
             }
             // BallStick falls back here only when the mesh path would overflow;
             // bonds are dropped at that scale, but every atom is still shown.
             RenderStyle::BallStick => {
-                fill_sphere_instances(out, frame.molecule, frame.color_fn, opacity, |atom| {
-                    ball_stick_radius(&atom.element, false)
-                })
+                fill_sphere_instances(
+                    out,
+                    frame.molecule,
+                    frame.color_fn,
+                    opacity,
+                    radii,
+                    colors,
+                    |atom| ball_stick_radius(&atom.element, false),
+                )
             }
             RenderStyle::Wireframe => out.clear(),
         }
     }
 
-    fn build_geometry_cache_key(
-        &self,
-        molecule: Option<&Molecule>,
-        color_fn: ColorFn,
-    ) -> GeometryCacheKey {
+    fn build_geometry_cache_key(&self, frame: &RenderFrameState<'_>) -> GeometryCacheKey {
+        let slice_id = |s: Option<&[f32]>| s.map(|s| (s.as_ptr() as usize, s.len())).unwrap_or((0, 0));
+        let color_id = frame
+            .atom_colors
+            .map(|s| (s.as_ptr() as usize, s.len()))
+            .unwrap_or((0, 0));
         GeometryCacheKey {
-            molecule_ptr: molecule
+            molecule_ptr: frame
+                .molecule
                 .map(|mol| mol as *const Molecule as usize)
                 .unwrap_or(0),
-            generation: molecule.map(|mol| mol.generation()).unwrap_or(0),
+            generation: frame.molecule.map(|mol| mol.generation()).unwrap_or(0),
             render_style: self.preference.render_style(),
-            color_fn_ptr: color_fn as usize,
+            color_fn_ptr: frame.color_fn as usize,
             mesh_resolution: self.preference.mesh_resolution(),
+            molecule_opacity_bits: frame.molecule_opacity.to_bits(),
+            atom_radii_id: slice_id(frame.atom_radii),
+            atom_colors_id: color_id,
         }
     }
 

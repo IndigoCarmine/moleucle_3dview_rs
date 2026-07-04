@@ -135,16 +135,22 @@ pub(super) fn build_ballstick_vertices(
             }
         }
 
-        'atoms: for atom in &mol.atoms {
+        'atoms: for (i, atom) in mol.atoms.iter().enumerate() {
             let pos = atom.position;
-            let radius = ball_stick_radius(&atom.element, false);
-            let color_tuple = color_fn(atom, false);
-            let color = [
-                color_tuple.0,
-                color_tuple.1,
-                color_tuple.2,
-                color_tuple.3 * context.molecule_opacity,
-            ];
+            // Per-atom radius / color overrides (e.g. CG beads) when supplied,
+            // else the element-derived radius and the color function.
+            let radius = context
+                .atom_radii
+                .and_then(|r| r.get(i).copied())
+                .unwrap_or_else(|| ball_stick_radius(&atom.element, false));
+            let base = context
+                .atom_colors
+                .and_then(|c| c.get(i).copied())
+                .unwrap_or_else(|| {
+                    let c = color_fn(atom, false);
+                    [c.0, c.1, c.2, c.3]
+                });
+            let color = [base[0], base[1], base[2], base[3] * context.molecule_opacity];
 
             if !append_mesh_triangles(
                 &mut vertices,
