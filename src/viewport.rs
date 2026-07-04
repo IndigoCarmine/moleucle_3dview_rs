@@ -130,6 +130,18 @@ impl InteractiveMoleculeViewport {
         self.offscreen.set_render_style(render_style);
     }
 
+    /// Current whole-molecule opacity (`0.0..=1.0`).
+    pub fn molecule_opacity(&self) -> f32 {
+        self.viewer.molecule_opacity
+    }
+
+    /// Set the whole-molecule opacity (atoms + bonds), clamped to `0.0..=1.0`.
+    /// `1.0` is fully opaque; lower values fade the main molecule via alpha
+    /// blending. The additional-render overlays are unaffected.
+    pub fn set_molecule_opacity(&mut self, opacity: f32) {
+        self.viewer.set_molecule_opacity(opacity);
+    }
+
     pub fn free_egui_texture(&mut self, render_state: &egui_wgpu::RenderState) {
         self.offscreen.free_egui_texture(render_state);
     }
@@ -174,6 +186,7 @@ impl InteractiveMoleculeViewport {
             self.offscreen.render_style(),
             self.offscreen.mesh_resolution(),
             self.offscreen.is_low_mode(),
+            self.viewer.molecule_opacity,
         );
 
         self.offscreen

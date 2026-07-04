@@ -395,6 +395,7 @@ impl OffscreenRenderer {
                     preference: self.preference,
                     sphere_mesh: &self.sphere_mesh,
                     cylinder_mesh: &self.cylinder_mesh,
+                    molecule_opacity: frame.molecule_opacity,
                 };
                 Some(active_style.build_vertices(&ctx, frame.molecule, frame.color_fn))
             } else {
@@ -663,6 +664,7 @@ impl OffscreenRenderer {
             self.preference.render_style(),
             self.preference.mesh_resolution(),
             self.preference.is_low_mode(),
+            1.0,
         );
         self.render_frame_with_state(render_state, &frame)
     }
@@ -787,17 +789,20 @@ impl OffscreenRenderer {
         render_style: RenderStyle,
         frame: &RenderFrameState<'_>,
     ) {
+        let opacity = frame.molecule_opacity;
         match render_style {
-            RenderStyle::Circles => fill_circle_instances(out, frame.molecule, frame.color_fn),
+            RenderStyle::Circles => {
+                fill_circle_instances(out, frame.molecule, frame.color_fn, opacity)
+            }
             RenderStyle::BallOnly => {
-                fill_sphere_instances(out, frame.molecule, frame.color_fn, |atom| {
+                fill_sphere_instances(out, frame.molecule, frame.color_fn, opacity, |atom| {
                     vdw_radius(&atom.element)
                 })
             }
             // BallStick falls back here only when the mesh path would overflow;
             // bonds are dropped at that scale, but every atom is still shown.
             RenderStyle::BallStick => {
-                fill_sphere_instances(out, frame.molecule, frame.color_fn, |atom| {
+                fill_sphere_instances(out, frame.molecule, frame.color_fn, opacity, |atom| {
                     ball_stick_radius(&atom.element, false)
                 })
             }

@@ -115,7 +115,7 @@ pub(super) fn build_ballstick_vertices(
                             &mut vertices,
                             a + lateral * offset,
                             b + lateral * offset,
-                            [0.55, 0.55, 0.55, 1.0],
+                            [0.55, 0.55, 0.55, context.molecule_opacity],
                             max_vertices,
                         ) {
                             break 'bonds;
@@ -126,7 +126,7 @@ pub(super) fn build_ballstick_vertices(
                         mid + lateral * offset,
                         orientation,
                         Vec3::new(base_radius, len, base_radius),
-                        [0.55, 0.55, 0.55, 1.0],
+                        [0.55, 0.55, 0.55, context.molecule_opacity],
                         max_vertices,
                     ) {
                         break 'bonds;
@@ -139,7 +139,12 @@ pub(super) fn build_ballstick_vertices(
             let pos = atom.position;
             let radius = ball_stick_radius(&atom.element, false);
             let color_tuple = color_fn(atom, false);
-            let color = [color_tuple.0, color_tuple.1, color_tuple.2, color_tuple.3];
+            let color = [
+                color_tuple.0,
+                color_tuple.1,
+                color_tuple.2,
+                color_tuple.3 * context.molecule_opacity,
+            ];
 
             if !append_mesh_triangles(
                 &mut vertices,
