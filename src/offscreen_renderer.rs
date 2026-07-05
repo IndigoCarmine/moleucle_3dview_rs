@@ -596,10 +596,7 @@ impl OffscreenRenderer {
                             pass.set_pipeline(&gpu.bond_pipeline);
                             pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
                             pass.set_vertex_buffer(1, bond_buffer.slice(..));
-                            pass.draw(
-                                0..gpu.bond_mesh_vertex_count,
-                                0..gpu.bond_instance_count,
-                            );
+                            pass.draw(0..gpu.bond_mesh_vertex_count, 0..gpu.bond_instance_count);
                         }
                     }
                 }
@@ -612,13 +609,14 @@ impl OffscreenRenderer {
                 additional_batches.into_iter()
             {
                 if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
-                    let additional_vertex_buffer = render_state.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("offscreen-additional-vertex-buffer"),
-                            contents: bytemuck::cast_slice(&additional_vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    );
+                    let additional_vertex_buffer =
+                        render_state
+                            .device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("offscreen-additional-vertex-buffer"),
+                                contents: bytemuck::cast_slice(&additional_vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
 
                     let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind);
                     pass.set_pipeline(pipeline);
@@ -627,13 +625,14 @@ impl OffscreenRenderer {
                 }
 
                 if !additional_sphere_impostors.is_empty() {
-                    let sphere_instance_buffer = render_state.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("offscreen-additional-sphere-instance-buffer"),
-                            contents: bytemuck::cast_slice(&additional_sphere_impostors),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    );
+                    let sphere_instance_buffer =
+                        render_state
+                            .device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("offscreen-additional-sphere-instance-buffer"),
+                                contents: bytemuck::cast_slice(&additional_sphere_impostors),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
 
                     let pipeline = Self::additional_pipeline_for(gpu, GpuPipeline::SphereImpostor);
                     pass.set_pipeline(pipeline);
@@ -806,36 +805,33 @@ impl OffscreenRenderer {
             RenderStyle::Circles => {
                 fill_circle_instances(out, frame.molecule, frame.color_fn, opacity, radii, colors)
             }
-            RenderStyle::BallOnly => {
-                fill_sphere_instances(
-                    out,
-                    frame.molecule,
-                    frame.color_fn,
-                    opacity,
-                    radii,
-                    colors,
-                    |atom| vdw_radius(&atom.element),
-                )
-            }
+            RenderStyle::BallOnly => fill_sphere_instances(
+                out,
+                frame.molecule,
+                frame.color_fn,
+                opacity,
+                radii,
+                colors,
+                |atom| vdw_radius(&atom.element),
+            ),
             // BallStick falls back here only when the mesh path would overflow;
             // bonds are dropped at that scale, but every atom is still shown.
-            RenderStyle::BallStick => {
-                fill_sphere_instances(
-                    out,
-                    frame.molecule,
-                    frame.color_fn,
-                    opacity,
-                    radii,
-                    colors,
-                    |atom| ball_stick_radius(&atom.element, false),
-                )
-            }
+            RenderStyle::BallStick => fill_sphere_instances(
+                out,
+                frame.molecule,
+                frame.color_fn,
+                opacity,
+                radii,
+                colors,
+                |atom| ball_stick_radius(&atom.element, false),
+            ),
             RenderStyle::Wireframe => out.clear(),
         }
     }
 
     fn build_geometry_cache_key(&self, frame: &RenderFrameState<'_>) -> GeometryCacheKey {
-        let slice_id = |s: Option<&[f32]>| s.map(|s| (s.as_ptr() as usize, s.len())).unwrap_or((0, 0));
+        let slice_id =
+            |s: Option<&[f32]>| s.map(|s| (s.as_ptr() as usize, s.len())).unwrap_or((0, 0));
         let color_id = frame
             .atom_colors
             .map(|s| (s.as_ptr() as usize, s.len()))
@@ -937,9 +933,21 @@ fn append_mesh_triangles(
     max_vertices: usize,
 ) -> bool {
     let inv_scale = lin_alg::f32::Vec3::new(
-        if scale.x.abs() > 1e-6 { 1.0 / scale.x } else { 0.0 },
-        if scale.y.abs() > 1e-6 { 1.0 / scale.y } else { 0.0 },
-        if scale.z.abs() > 1e-6 { 1.0 / scale.z } else { 0.0 },
+        if scale.x.abs() > 1e-6 {
+            1.0 / scale.x
+        } else {
+            0.0
+        },
+        if scale.y.abs() > 1e-6 {
+            1.0 / scale.y
+        } else {
+            0.0
+        },
+        if scale.z.abs() > 1e-6 {
+            1.0 / scale.z
+        } else {
+            0.0
+        },
     );
 
     for tri in mesh.indices.chunks_exact(3) {
@@ -957,11 +965,8 @@ fn append_mesh_triangles(
             let p_world = orientation.rotate_vec(p_scaled) + position;
 
             let n = lin_alg::f32::Vec3::new(src.normal[0], src.normal[1], src.normal[2]);
-            let n_scaled = lin_alg::f32::Vec3::new(
-                n.x * inv_scale.x,
-                n.y * inv_scale.y,
-                n.z * inv_scale.z,
-            );
+            let n_scaled =
+                lin_alg::f32::Vec3::new(n.x * inv_scale.x, n.y * inv_scale.y, n.z * inv_scale.z);
             let n_world = orientation.rotate_vec(n_scaled).to_normalized();
 
             out.push(Vertex {
