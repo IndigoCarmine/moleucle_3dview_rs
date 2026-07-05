@@ -1,5 +1,4 @@
 use crate::additional_render::{AdditionalRender, GpuPipeline};
-use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::frame_state::RenderFrameState;
 use crate::render_state::SharedRenderStates;
 use crate::scene_types::{Scene, SphereImpostorInstance};
@@ -220,10 +219,99 @@ pub enum RenderStyle {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+pub(super) struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
     color: [f32; 3],
+}
+
+pub(super) trait VertexSink {
+    fn push_vertex(&mut self, vertex: Vertex);
+}
+
+struct CollectingVertexSink {
+    vertices: Vec<Vertex>,
+}
+
+impl CollectingVertexSink {
+    fn new() -> Self {
+        Self { vertices: Vec::new() }
+    }
+
+    fn into_inner(self) -> Vec<Vertex> {
+        self.vertices
+    }
+}
+
+impl VertexSink for CollectingVertexSink {
+    fn push_vertex(&mut self, vertex: Vertex) {
+        self.vertices.push(vertex);
+    }
+}
+
+struct BatchingVertexSink<'a> {
+    device: &'a wgpu::Device,
+    label_prefix: &'a str,
+    primitive_stride: usize,
+    batch_vertex_limit: usize,
+    vertices: Vec<Vertex>,
+    batches: Vec<VertexBufferBatch>,
+}
+
+impl<'a> BatchingVertexSink<'a> {
+    fn new(device: &'a wgpu::Device, label_prefix: &'a str, primitive_stride: usize) -> Self {
+        let primitive_stride = primitive_stride.max(1);
+        let mut batch_vertex_limit = MAX_RENDER_VERTICES.max(primitive_stride);
+        batch_vertex_limit -= batch_vertex_limit % primitive_stride;
+        if batch_vertex_limit == 0 {
+            batch_vertex_limit = primitive_stride;
+        }
+
+        Self {
+            device,
+            label_prefix,
+            primitive_stride,
+            batch_vertex_limit,
+            vertices: Vec::new(),
+            batches: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> Vec<VertexBufferBatch> {
+        self.flush();
+        self.batches
+    }
+
+    fn flush(&mut self) {
+        if self.vertices.is_empty() {
+            return;
+        }
+
+        let batch_index = self.batches.len();
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{}-{batch_index}", self.label_prefix)),
+            contents: bytemuck::cast_slice(&self.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        self.batches.push(VertexBufferBatch {
+            buffer,
+            count: self.vertices.len() as u32,
+        });
+        self.vertices.clear();
+    }
+}
+
+impl<'a> VertexSink for BatchingVertexSink<'a> {
+    fn push_vertex(&mut self, vertex: Vertex) {
+        self.vertices.push(vertex);
+
+        if self.vertices.len() >= self.batch_vertex_limit
+            && self.vertices.len() % self.primitive_stride == 0
+        {
+            self.flush();
+        }
+    }
 }
 
 #[repr(C)]
@@ -259,12 +347,43 @@ struct GpuResources {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GeometryCacheKey {
-    molecule_ptr: usize,
+    /// Hash of molecule *content* (atom positions/elements + bonds). Using a content
+    /// hash rather than the molecule's address means in-place geometry updates
+    /// (e.g. animating an MM minimization via repeated `set_molecule`) correctly
+    /// invalidate the cached geometry.
+    molecule_hash: u64,
     render_style: RenderStyle,
     color_fn_ptr: usize,
     mesh_resolution: usize,
 }
 
+/// Hash the geometry-relevant content of a molecule so the renderer rebuilds its
+/// vertex buffers whenever atom positions, elements, or bonds change.
+fn molecule_geometry_hash(molecule: Option<&Molecule>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match molecule {
+        None => 0u8.hash(&mut hasher),
+        Some(mol) => {
+            mol.atoms.len().hash(&mut hasher);
+            for atom in &mol.atoms {
+                atom.element.hash(&mut hasher);
+                atom.position.x.to_bits().hash(&mut hasher);
+                atom.position.y.to_bits().hash(&mut hasher);
+                atom.position.z.to_bits().hash(&mut hasher);
+            }
+            mol.bonds.len().hash(&mut hasher);
+            for bond in &mol.bonds {
+                bond.atom_a.hash(&mut hasher);
+                bond.atom_b.hash(&mut hasher);
+                bond.order.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BallstickQuality {
     High,
@@ -448,30 +567,18 @@ impl OffscreenRenderer {
         }
     }
 
+    #[allow(dead_code)]
     fn upload_vertex_batches(
         device: &wgpu::Device,
         label_prefix: &str,
         vertices: Vec<Vertex>,
         primitive_stride: usize,
     ) -> Vec<VertexBufferBatch> {
-        let ranges = vertex_batch_bounds(vertices.len(), primitive_stride, MAX_RENDER_VERTICES);
-        let mut batches = Vec::with_capacity(ranges.len());
-
-        for (batch_index, (start, len)) in ranges.into_iter().enumerate() {
-            let end = start + len;
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("{label_prefix}-{batch_index}")),
-                contents: bytemuck::cast_slice(&vertices[start..end]),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-            batches.push(VertexBufferBatch {
-                buffer,
-                count: len as u32,
-            });
+        let mut sink = BatchingVertexSink::new(device, label_prefix, primitive_stride);
+        for vertex in vertices {
+            sink.push_vertex(vertex);
         }
-
-        batches
+        sink.finish()
     }
 
     fn draw_vertex_batches(pass: &mut wgpu::RenderPass<'_>, batches: &[VertexBufferBatch]) {
@@ -507,11 +614,6 @@ impl OffscreenRenderer {
             Some(style_for(self.preference.render_style()))
         };
         let cache_key = self.build_geometry_cache_key(frame.molecule, frame.color_fn);
-        let rebuilt_vertices = if !is_circles && self.geometry_cache_key != Some(cache_key) {
-            Some(self.build_scene_vertices(frame.molecule, frame.color_fn))
-        } else {
-            None
-        };
         let circles_instances = if is_circles {
             Some(build_circle_instances(
                 frame.molecule,
@@ -521,7 +623,11 @@ impl OffscreenRenderer {
         } else {
             None
         };
-        let additional_batches: Vec<(GpuPipeline, Vec<Vertex>, Vec<SphereImpostorInstance>)> = self
+        let additional_batches: Vec<(
+            GpuPipeline,
+            Vec<VertexBufferBatch>,
+            Vec<SphereImpostorInstance>,
+        )> = self
             .additional_renders
             .iter()
             .map(|additional| {
@@ -531,30 +637,48 @@ impl OffscreenRenderer {
                     sphere_impostors: Vec::new(),
                 };
                 additional.update_scene(&mut additional_scene, frame);
+                let primitive_stride = match additional.gpu_pipeline() {
+                    GpuPipeline::Triangles => 3,
+                    GpuPipeline::Wireframe => 2,
+                    GpuPipeline::SphereImpostor => 3,
+                };
+                let mut sink = BatchingVertexSink::new(
+                    &render_state.device,
+                    "offscreen-additional-vertex-buffer",
+                    primitive_stride,
+                );
+                self.emit_additional_scene_vertices(&additional_scene, &mut sink);
+
                 (
                     additional.gpu_pipeline(),
-                    self.build_additional_scene_vertices(&additional_scene),
+                    sink.finish(),
                     additional_scene.sphere_impostors,
                 )
             })
             .collect();
+
+        let vertex_batches = if !is_circles && self.geometry_cache_key != Some(cache_key) {
+            let primitive_stride = style
+                .map(|active_style| active_style.primitive_stride())
+                .unwrap_or(3);
+            let mut sink = BatchingVertexSink::new(
+                &render_state.device,
+                "offscreen-vertex-buffer",
+                primitive_stride,
+            );
+            self.emit_scene_vertices(frame.molecule, frame.color_fn, &mut sink);
+            Some(sink.finish())
+        } else {
+            None
+        };
 
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| "Offscreen GPU resources are not initialized".to_string())?;
 
-        if let Some(vertices) = rebuilt_vertices {
-            let primitive_stride = style
-                .map(|active_style| active_style.primitive_stride())
-                .unwrap_or(3);
-
-            gpu.vertex_batches = Self::upload_vertex_batches(
-                &render_state.device,
-                "offscreen-vertex-buffer",
-                vertices,
-                primitive_stride,
-            );
+        if let Some(vertex_batches) = vertex_batches {
+            gpu.vertex_batches = vertex_batches;
             self.geometry_cache_key = Some(cache_key);
         }
 
@@ -657,22 +781,10 @@ impl OffscreenRenderer {
                 Self::draw_vertex_batches(&mut pass, &gpu.vertex_batches);
             }
 
-            for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
+            for (pipeline_kind, additional_vertex_batches, additional_sphere_impostors) in
                 additional_batches.into_iter()
             {
-                if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
-                    let primitive_stride = match pipeline_kind {
-                        GpuPipeline::Triangles => 3,
-                        GpuPipeline::Wireframe => 2,
-                        GpuPipeline::SphereImpostor => 3,
-                    };
-                    let additional_vertex_batches = Self::upload_vertex_batches(
-                        &render_state.device,
-                        "offscreen-additional-vertex-buffer",
-                        additional_vertices,
-                        primitive_stride,
-                    );
-
+                if !additional_vertex_batches.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
                     let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind);
                     pass.set_pipeline(pipeline);
                     Self::draw_vertex_batches(&mut pass, &additional_vertex_batches);
@@ -807,27 +919,28 @@ impl OffscreenRenderer {
         color_fn: ColorFn,
     ) -> GeometryCacheKey {
         GeometryCacheKey {
-            molecule_ptr: molecule
-                .map(|mol| mol as *const Molecule as usize)
-                .unwrap_or(0),
+            molecule_hash: molecule_geometry_hash(molecule),
             render_style: self.preference.render_style(),
             color_fn_ptr: color_fn as usize,
             mesh_resolution: self.preference.mesh_resolution(),
         }
     }
 
-    fn build_scene_vertices(&self, molecule: Option<&Molecule>, color_fn: ColorFn) -> Vec<Vertex> {
-        match self.preference.render_style() {
-            RenderStyle::BallStick => self.build_ballstick_vertices(molecule, color_fn),
-            RenderStyle::BallOnly => self.build_ballstick_vertices(molecule, color_fn),
-            RenderStyle::Circles => Vec::new(),
-            RenderStyle::Wireframe => self.build_wireframe_vertices(molecule, color_fn),
+    fn emit_scene_vertices(&self, molecule: Option<&Molecule>, color_fn: ColorFn, sink: &mut dyn VertexSink) {
+        if matches!(self.preference.render_style(), RenderStyle::Circles) {
+            return;
         }
+
+        let style_context = render_styles::StyleBuildContext {
+            preference: self.preference,
+            sphere_mesh: &self.sphere_mesh,
+            cylinder_mesh: &self.cylinder_mesh,
+        };
+        let style = style_for(self.preference.render_style());
+        style.emit_vertices(&style_context, molecule, color_fn, sink);
     }
 
-    fn build_additional_scene_vertices(&self, scene: &Scene) -> Vec<Vertex> {
-        let mut vertices = Vec::new();
-
+    fn emit_additional_scene_vertices(&self, scene: &Scene, sink: &mut dyn VertexSink) {
         for entity in &scene.entities {
             let Some(mesh) = scene.meshes.get(entity.mesh) else {
                 continue;
@@ -842,7 +955,7 @@ impl OffscreenRenderer {
             for tri in mesh.indices.chunks_exact(3) {
                 for &idx in tri {
                     let Some(src) = mesh.vertices.get(idx) else {
-                        return vertices;
+                        return;
                     };
 
                     let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
@@ -852,7 +965,7 @@ impl OffscreenRenderer {
                     let n = src.normal;
                     let n_world = entity.orientation.rotate_vec(n).to_normalized();
 
-                    vertices.push(Vertex {
+                    sink.push_vertex(Vertex {
                         position: [p_world.x, p_world.y, p_world.z],
                         normal: [n_world.x, n_world.y, n_world.z],
                         color,
@@ -860,368 +973,8 @@ impl OffscreenRenderer {
                 }
             }
         }
-
-        vertices
     }
 
-    fn build_ballstick_vertices(
-        &self,
-        molecule: Option<&Molecule>,
-        color_fn: ColorFn,
-    ) -> Vec<Vertex> {
-        let render_style = self.preference.render_style();
-        let include_bonds = !matches!(render_style, RenderStyle::BallOnly);
-        let quality = self.pick_ballstick_quality(molecule);
-        let mesh_resolution = self.preference.mesh_resolution();
-        let quality_resolution = match quality {
-            BallstickQuality::High => mesh_resolution.max(3),
-            BallstickQuality::Medium => (mesh_resolution / 2).max(3),
-            BallstickQuality::Low => 3,
-        };
-        let low_mode = matches!(quality, BallstickQuality::Low);
-
-        let mesh_resolution = self.preference.mesh_resolution();
-        let generated_meshes = if quality_resolution == mesh_resolution {
-            None
-        } else {
-            Some((
-                RenderMesh::new_sphere_uv(1.0, quality_resolution, quality_resolution * 2),
-                RenderMesh::new_cylinder_open_ended(1.0, 1.0, DEFAULT_BOND_CYLINDER_SIDES),
-            ))
-        };
-        let (sphere_mesh, cylinder_mesh): (&RenderMesh, &RenderMesh) =
-            if let Some((sphere, cylinder)) = &generated_meshes {
-                (sphere, cylinder)
-            } else {
-                (&self.sphere_mesh, &self.cylinder_mesh)
-            };
-
-        let max_vertices = MAX_RENDER_VERTICES;
-        let mut vertices = if let Some(mol) = molecule {
-            // Estimate capacity: bonds * ~50 vertices + atoms * ~200 vertices + axes * ~75 vertices
-            let capacity = mol
-                .bonds
-                .len()
-                .saturating_mul(50)
-                .saturating_add(mol.atoms.len().saturating_mul(200))
-                .saturating_add(225)
-                .min(max_vertices);
-            Vec::with_capacity(capacity)
-        } else {
-            Vec::with_capacity(225.min(max_vertices)) // Just axes
-        };
-
-        if let Some(mol) = molecule {
-            if include_bonds {
-                'bonds: for bond in &mol.bonds {
-                    let a = mol.atoms[bond.atom_a].position;
-                    let b = mol.atoms[bond.atom_b].position;
-                    let diff = b - a;
-                    let len = diff.magnitude();
-                    if len < 0.001 {
-                        continue;
-                    }
-
-                    let dir = diff.to_normalized();
-                    let up = Vec3::new(0.0, 1.0, 0.0);
-                    let orientation = Quaternion::from_unit_vecs(up, dir);
-                    let mid = (a + b) * 0.5;
-
-                    let bond_order = bond.order.max(1) as usize;
-                    let line_offsets = bond_line_offsets(bond_order);
-                    let mut lateral = Vec3::new(1.0, 0.0, 0.0);
-                    if dir.dot(lateral).abs() > 0.9 {
-                        lateral = Vec3::new(0.0, 0.0, 1.0);
-                    }
-                    lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
-
-                    let base_radius = if bond_order <= 1 {
-                        default_ball_stick_bond_radius()
-                    } else {
-                        default_ball_stick_bond_radius() * 0.5
-                    };
-                    for offset in line_offsets {
-                        if low_mode {
-                            if !append_line(
-                                &mut vertices,
-                                a + lateral * offset,
-                                b + lateral * offset,
-                                [0.55, 0.55, 0.55],
-                                max_vertices,
-                            ) {
-                                break 'bonds;
-                            }
-                        } else if !append_mesh_triangles(
-                            &mut vertices,
-                            cylinder_mesh,
-                            mid + lateral * offset,
-                            orientation,
-                            Vec3::new(base_radius, len, base_radius),
-                            [0.55, 0.55, 0.55],
-                            max_vertices,
-                        ) {
-                            break 'bonds;
-                        }
-                    }
-                }
-            }
-
-            'atoms: for (_idx, atom) in mol.atoms.iter().enumerate() {
-                let pos = atom.position;
-                let radius = ball_stick_radius(&atom.element, false);
-                let color_tuple = color_fn(atom, false);
-                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
-
-                if !append_mesh_triangles(
-                    &mut vertices,
-                    sphere_mesh,
-                    pos,
-                    Quaternion::new_identity(),
-                    Vec3::new(radius, radius, radius),
-                    color,
-                    max_vertices,
-                ) {
-                    break 'atoms;
-                }
-            }
-        }
-
-        if include_bonds {
-            // xyz axes as cylinders
-            let axis_len = 0.2;
-            let axis_radius = 0.01;
-            if low_mode {
-                let _ = append_line(
-                    &mut vertices,
-                    Vec3::new(0.0, 0.0, 0.0),
-                    Vec3::new(axis_len, 0.0, 0.0),
-                    [1.0, 0.0, 0.0],
-                    max_vertices,
-                );
-                let _ = append_line(
-                    &mut vertices,
-                    Vec3::new(0.0, 0.0, 0.0),
-                    Vec3::new(0.0, axis_len, 0.0),
-                    [0.0, 1.0, 0.0],
-                    max_vertices,
-                );
-                let _ = append_line(
-                    &mut vertices,
-                    Vec3::new(0.0, 0.0, 0.0),
-                    Vec3::new(0.0, 0.0, axis_len),
-                    [0.0, 0.0, 1.0],
-                    max_vertices,
-                );
-            } else {
-                let _ = append_mesh_triangles(
-                    &mut vertices,
-                    cylinder_mesh,
-                    Vec3::new(axis_len * 0.5, 0.0, 0.0),
-                    Quaternion::from_axis_angle(
-                        Vec3::new(0.0, 0.0, 1.0),
-                        -std::f32::consts::FRAC_PI_2,
-                    ),
-                    Vec3::new(axis_radius, axis_len, axis_radius),
-                    [1.0, 0.0, 0.0],
-                    max_vertices,
-                );
-                let _ = append_mesh_triangles(
-                    &mut vertices,
-                    cylinder_mesh,
-                    Vec3::new(0.0, axis_len * 0.5, 0.0),
-                    Quaternion::new_identity(),
-                    Vec3::new(axis_radius, axis_len, axis_radius),
-                    [0.0, 1.0, 0.0],
-                    max_vertices,
-                );
-                let _ = append_mesh_triangles(
-                    &mut vertices,
-                    cylinder_mesh,
-                    Vec3::new(0.0, 0.0, axis_len * 0.5),
-                    Quaternion::from_axis_angle(
-                        Vec3::new(1.0, 0.0, 0.0),
-                        std::f32::consts::FRAC_PI_2,
-                    ),
-                    Vec3::new(axis_radius, axis_len, axis_radius),
-                    [0.0, 0.0, 1.0],
-                    max_vertices,
-                );
-            }
-        }
-
-        vertices
-    }
-
-    fn pick_ballstick_quality(&self, molecule: Option<&Molecule>) -> BallstickQuality {
-        let Some(mol) = molecule else {
-            return BallstickQuality::High;
-        };
-
-        let high = self.estimate_ballstick_vertices(mol, BallstickQuality::High);
-        if high <= MAX_RENDER_VERTICES {
-            return BallstickQuality::High;
-        }
-
-        let medium = self.estimate_ballstick_vertices(mol, BallstickQuality::Medium);
-        if medium <= MAX_RENDER_VERTICES {
-            return BallstickQuality::Medium;
-        }
-
-        BallstickQuality::Low
-    }
-
-    fn estimate_ballstick_vertices(&self, molecule: &Molecule, quality: BallstickQuality) -> usize {
-        let resolution = match quality {
-            BallstickQuality::High => self.preference.mesh_resolution().max(3),
-            BallstickQuality::Medium => (self.preference.mesh_resolution() / 2).max(3),
-            BallstickQuality::Low => 3,
-        };
-
-        let sphere_vertices_per_atom = resolution
-            .saturating_mul(resolution.saturating_mul(2))
-            .saturating_mul(6);
-        let atom_vertices = molecule
-            .atoms
-            .len()
-            .saturating_mul(sphere_vertices_per_atom);
-
-        let bond_vertices = if matches!(quality, BallstickQuality::Low) {
-            molecule.bonds.len().saturating_mul(2)
-        } else {
-            let cylinder_vertices = DEFAULT_BOND_CYLINDER_SIDES.saturating_mul(6);
-            let bond_instances = molecule.bonds.iter().fold(0usize, |acc, bond| {
-                acc.saturating_add(bond_line_offsets(bond.order.max(1) as usize).len())
-            });
-            bond_instances.saturating_mul(cylinder_vertices)
-        };
-
-        let axis_vertices = if matches!(quality, BallstickQuality::Low) {
-            6
-        } else {
-            (resolution.saturating_mul(2))
-                .saturating_mul(12)
-                .saturating_mul(3)
-        };
-
-        atom_vertices
-            .saturating_add(bond_vertices)
-            .saturating_add(axis_vertices)
-    }
-
-    fn build_wireframe_vertices(
-        &self,
-        molecule: Option<&Molecule>,
-        color_fn: ColorFn,
-    ) -> Vec<Vertex> {
-        let max_vertices = MAX_RENDER_VERTICES;
-        let mut vertices = if let Some(mol) = molecule {
-            // Estimate capacity: bonds * ~4 + atoms * ~6 + axes * ~6
-            // This is much less than ballstick since we're only adding lines
-            let capacity = mol
-                .bonds
-                .len()
-                .saturating_mul(4)
-                .saturating_add(mol.atoms.len().saturating_mul(6))
-                .saturating_add(6)
-                .min(max_vertices);
-            Vec::with_capacity(capacity)
-        } else {
-            Vec::with_capacity(6.min(max_vertices)) // Just axes
-        };
-
-        if let Some(mol) = molecule {
-            'bonds: for bond in &mol.bonds {
-                let a = mol.atoms[bond.atom_a].position;
-                let b = mol.atoms[bond.atom_b].position;
-                let diff = b - a;
-                let len = diff.magnitude();
-                if len < 0.001 {
-                    continue;
-                }
-
-                let dir = diff.to_normalized();
-                let mut lateral = Vec3::new(1.0, 0.0, 0.0);
-                if dir.dot(lateral).abs() > 0.9 {
-                    lateral = Vec3::new(0.0, 0.0, 1.0);
-                }
-                lateral = (lateral - dir * lateral.dot(dir)).to_normalized();
-
-                let bond_order = bond.order.max(1) as usize;
-                for offset in bond_line_offsets(bond_order) {
-                    let off = lateral * offset;
-                    if !append_line(
-                        &mut vertices,
-                        a + off,
-                        b + off,
-                        [0.70, 0.70, 0.72],
-                        max_vertices,
-                    ) {
-                        break 'bonds;
-                    }
-                }
-            }
-
-            'atoms: for (_idx, atom) in mol.atoms.iter().enumerate() {
-                let pos = atom.position;
-                let span = 0.02;
-                let color_tuple = color_fn(atom, false);
-                let color = [color_tuple.0, color_tuple.1, color_tuple.2];
-
-                if !append_line(
-                    &mut vertices,
-                    pos + Vec3::new(-span, 0.0, 0.0),
-                    pos + Vec3::new(span, 0.0, 0.0),
-                    color,
-                    max_vertices,
-                ) {
-                    break 'atoms;
-                }
-                if !append_line(
-                    &mut vertices,
-                    pos + Vec3::new(0.0, -span, 0.0),
-                    pos + Vec3::new(0.0, span, 0.0),
-                    color,
-                    max_vertices,
-                ) {
-                    break 'atoms;
-                }
-                if !append_line(
-                    &mut vertices,
-                    pos + Vec3::new(0.0, 0.0, -span),
-                    pos + Vec3::new(0.0, 0.0, span),
-                    color,
-                    max_vertices,
-                ) {
-                    break 'atoms;
-                }
-            }
-        }
-
-        let axis_len = 2.0;
-        let _ = append_line(
-            &mut vertices,
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(axis_len, 0.0, 0.0),
-            [1.0, 0.0, 0.0],
-            max_vertices,
-        );
-        let _ = append_line(
-            &mut vertices,
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(0.0, axis_len, 0.0),
-            [0.0, 1.0, 0.0],
-            max_vertices,
-        );
-        let _ = append_line(
-            &mut vertices,
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(0.0, 0.0, axis_len),
-            [0.0, 0.0, 1.0],
-            max_vertices,
-        );
-
-        vertices
-    }
 }
 
 impl Default for OffscreenRenderer {
@@ -1785,13 +1538,12 @@ fn bond_line_offsets(order: usize) -> Vec<f32> {
 }
 
 fn append_mesh_triangles(
-    out: &mut Vec<Vertex>,
+    out: &mut dyn VertexSink,
     mesh: &RenderMesh,
     position: Vec3,
     orientation: Quaternion,
     scale: Vec3,
     color: [f32; 3],
-    max_vertices: usize,
 ) -> bool {
     let inv_scale = Vec3::new(
         if scale.x.abs() > 1e-6 {
@@ -1812,10 +1564,6 @@ fn append_mesh_triangles(
     );
 
     for tri in mesh.indices.chunks_exact(3) {
-        if out.len().saturating_add(3) > max_vertices {
-            return false;
-        }
-
         for &idx in tri {
             let Some(src) = mesh.vertices.get(idx) else {
                 return false;
@@ -1829,7 +1577,7 @@ fn append_mesh_triangles(
             let n_scaled = Vec3::new(n.x * inv_scale.x, n.y * inv_scale.y, n.z * inv_scale.z);
             let n_world = orientation.rotate_vec(n_scaled).to_normalized();
 
-            out.push(Vertex {
+            out.push_vertex(Vertex {
                 position: [p_world.x, p_world.y, p_world.z],
                 normal: [n_world.x, n_world.y, n_world.z],
                 color,
@@ -1949,23 +1697,18 @@ impl RenderMesh {
 }
 
 fn append_line(
-    out: &mut Vec<Vertex>,
+    out: &mut dyn VertexSink,
     a: Vec3,
     b: Vec3,
     color: [f32; 3],
-    max_vertices: usize,
 ) -> bool {
-    if out.len().saturating_add(2) > max_vertices {
-        return false;
-    }
-
     let normal = [0.0, 1.0, 0.0];
-    out.push(Vertex {
+    out.push_vertex(Vertex {
         position: [a.x, a.y, a.z],
         normal,
         color,
     });
-    out.push(Vertex {
+    out.push_vertex(Vertex {
         position: [b.x, b.y, b.z],
         normal,
         color,
@@ -1984,6 +1727,7 @@ fn resolution_for_distance(distance: f32, lod_settings: LodSettings) -> usize {
     }
 }
 
+#[allow(dead_code)]
 fn vertex_batch_bounds(
     total_vertices: usize,
     primitive_stride: usize,
@@ -2012,7 +1756,59 @@ fn vertex_batch_bounds(
 
 #[cfg(test)]
 mod tests {
-    use super::vertex_batch_bounds;
+    use super::{molecule_geometry_hash, vertex_batch_bounds};
+    use crate::molecule::{Atom, Bond};
+    use crate::Molecule;
+    use lin_alg::f32::Vec3;
+
+    fn carbon(x: f32) -> Atom {
+        Atom {
+            position: Vec3::new(x, 0.0, 0.0),
+            element: "C".to_string(),
+            id: 0,
+            name: None,
+            res_name: None,
+            chain_id: None,
+            res_seq: None,
+            occupancy: None,
+            temp_factor: None,
+            charge: None,
+        }
+    }
+
+    #[test]
+    fn geometry_hash_changes_when_atom_moves() {
+        // Regression: animating an MM minimization updates positions in place via
+        // repeated set_molecule. The geometry cache must invalidate on position change.
+        let m1 = Molecule {
+            atoms: vec![carbon(0.0)],
+            bonds: vec![],
+        };
+        let m2 = Molecule {
+            atoms: vec![carbon(1.0)],
+            bonds: vec![],
+        };
+        assert_ne!(
+            molecule_geometry_hash(Some(&m1)),
+            molecule_geometry_hash(Some(&m2)),
+        );
+    }
+
+    #[test]
+    fn geometry_hash_stable_for_identical_molecules() {
+        let make = || Molecule {
+            atoms: vec![carbon(0.5)],
+            bonds: vec![Bond {
+                atom_a: 0,
+                atom_b: 0,
+                order: 1,
+            }],
+        };
+        assert_eq!(
+            molecule_geometry_hash(Some(&make())),
+            molecule_geometry_hash(Some(&make())),
+        );
+    }
 
     #[test]
     fn vertex_batch_bounds_keeps_full_primitives() {

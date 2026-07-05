@@ -6,7 +6,7 @@ use crate::Molecule;
 
 use super::super::{
     append_line, append_mesh_triangles, bond_line_offsets, RenderMesh, Vertex,
-    DEFAULT_BOND_CYLINDER_SIDES, MAX_RENDER_VERTICES,
+    DEFAULT_BOND_CYLINDER_SIDES, MAX_RENDER_VERTICES, VertexSink,
 };
 use super::{MolecularRenderStyle, StyleBuildContext};
 
@@ -27,23 +27,36 @@ impl MolecularRenderStyle for BallStickStyle {
         3
     }
 
-    fn build_vertices(
+    fn emit_vertices(
         &self,
         context: &StyleBuildContext<'_>,
         molecule: Option<&Molecule>,
         color_fn: ColorFn,
-    ) -> Vec<Vertex> {
-        build_ballstick_vertices(context, molecule, color_fn, true)
+        sink: &mut dyn VertexSink,
+    ) {
+        emit_ballstick_vertices_into(context, molecule, color_fn, true, sink)
     }
 }
 
 #[allow(dead_code)]
-pub(super) fn build_ballstick_vertices(
+pub(super) fn emit_ballstick_vertices(
     context: &StyleBuildContext<'_>,
     molecule: Option<&Molecule>,
     color_fn: ColorFn,
     include_bonds: bool,
 ) -> Vec<Vertex> {
+    let mut collector = super::super::CollectingVertexSink::new();
+    emit_ballstick_vertices_into(context, molecule, color_fn, include_bonds, &mut collector);
+    collector.into_inner()
+}
+
+pub(super) fn emit_ballstick_vertices_into(
+    context: &StyleBuildContext<'_>,
+    molecule: Option<&Molecule>,
+    color_fn: ColorFn,
+    include_bonds: bool,
+    sink: &mut dyn VertexSink,
+) {
     let quality = pick_ballstick_quality(context, molecule);
     let mesh_resolution = context.preference.mesh_resolution();
     let quality_resolution = match quality {
@@ -67,20 +80,6 @@ pub(super) fn build_ballstick_vertices(
         } else {
             (context.sphere_mesh, context.cylinder_mesh)
         };
-
-    let mut vertices = if let Some(mol) = molecule {
-        let capacity = mol
-            .bonds
-            .len()
-            .saturating_mul(50)
-            .saturating_add(mol.atoms.len().saturating_mul(200))
-            .saturating_add(225)
-            .min(MAX_RENDER_VERTICES);
-        Vec::with_capacity(capacity)
-    } else {
-        Vec::with_capacity(225.min(MAX_RENDER_VERTICES))
-    };
-    let max_vertices = usize::MAX;
 
     if let Some(mol) = molecule {
         if include_bonds {
@@ -114,22 +113,20 @@ pub(super) fn build_ballstick_vertices(
                 for offset in line_offsets {
                     if low_mode {
                         if !append_line(
-                            &mut vertices,
+                            sink,
                             a + lateral * offset,
                             b + lateral * offset,
                             [0.55, 0.55, 0.55],
-                            max_vertices,
                         ) {
                             break 'bonds;
                         }
                     } else if !append_mesh_triangles(
-                        &mut vertices,
+                        sink,
                         cylinder_mesh,
                         mid + lateral * offset,
                         orientation,
                         Vec3::new(base_radius, len, base_radius),
                         [0.55, 0.55, 0.55],
-                        max_vertices,
                     ) {
                         break 'bonds;
                     }
@@ -144,13 +141,12 @@ pub(super) fn build_ballstick_vertices(
             let color = [color_tuple.0, color_tuple.1, color_tuple.2];
 
             if !append_mesh_triangles(
-                &mut vertices,
+                sink,
                 sphere_mesh,
                 pos,
                 Quaternion::new_identity(),
                 Vec3::new(radius, radius, radius),
                 color,
-                max_vertices,
             ) {
                 break 'atoms;
             }
@@ -162,58 +158,50 @@ pub(super) fn build_ballstick_vertices(
         let axis_radius = 0.01;
         if low_mode {
             let _ = append_line(
-                &mut vertices,
+                sink,
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(axis_len, 0.0, 0.0),
                 [1.0, 0.0, 0.0],
-                max_vertices,
             );
             let _ = append_line(
-                &mut vertices,
+                sink,
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(0.0, axis_len, 0.0),
                 [0.0, 1.0, 0.0],
-                max_vertices,
             );
             let _ = append_line(
-                &mut vertices,
+                sink,
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(0.0, 0.0, axis_len),
                 [0.0, 0.0, 1.0],
-                max_vertices,
             );
         } else {
             let _ = append_mesh_triangles(
-                &mut vertices,
+                sink,
                 cylinder_mesh,
                 Vec3::new(axis_len * 0.5, 0.0, 0.0),
                 Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
                 Vec3::new(axis_radius, axis_len, axis_radius),
                 [1.0, 0.0, 0.0],
-                max_vertices,
             );
             let _ = append_mesh_triangles(
-                &mut vertices,
+                sink,
                 cylinder_mesh,
                 Vec3::new(0.0, axis_len * 0.5, 0.0),
                 Quaternion::new_identity(),
                 Vec3::new(axis_radius, axis_len, axis_radius),
                 [0.0, 1.0, 0.0],
-                max_vertices,
             );
             let _ = append_mesh_triangles(
-                &mut vertices,
+                sink,
                 cylinder_mesh,
                 Vec3::new(0.0, 0.0, axis_len * 0.5),
                 Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
                 Vec3::new(axis_radius, axis_len, axis_radius),
                 [0.0, 0.0, 1.0],
-                max_vertices,
             );
         }
     }
-
-    vertices
 }
 
 #[allow(dead_code)]
