@@ -462,14 +462,15 @@ fn test_bond_distance_stats() {
     let avg_dist = sum_dist / mol.bonds.len() as f32;
 
     println!(
-        "Benzene bond statistics: min={:.3}Å, max={:.3}Å, avg={:.3}Å",
+        "Benzene bond statistics: min={:.3}nm, max={:.3}nm, avg={:.3}nm",
         min_dist, max_dist, avg_dist
     );
 
-    // Typical C-C bond length: 1.54 Å, C-H bond length: 1.09 Å
-    // so average should be somewhere between 1.0 and 1.6
+    // Positions are stored in nanometers (loaders apply ANGSTROM_TO_NANOMETER).
+    // Typical C-C bond length: 1.54 Å = 0.154 nm, C-H: 1.09 Å = 0.109 nm,
+    // so the average should be roughly 0.08–0.2 nm.
     assert!(
-        avg_dist > 0.8 && avg_dist < 2.0,
-        "Average bond distance should be chemically reasonable"
+        avg_dist > 0.08 && avg_dist < 0.2,
+        "Average bond distance should be chemically reasonable (in nm)"
     );
 }

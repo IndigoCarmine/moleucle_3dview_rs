@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use moleucle_3dview_rs::{Molecule, MoleculeViewer, SelectedAtomRender, ViewPortEvent};
+//! use moleucle_3dview_rs::{Molecule, MoleculeViewer};
 //! use std::path::Path;
 //!
 //! fn main() {
@@ -15,7 +15,7 @@
 //!         .expect("Failed to load molecule");
 //!
 //!     // Create a viewer
-//!     let mut viewer: MoleculeViewer<SelectedAtomRender> = MoleculeViewer::new();
+//!     let mut viewer = MoleculeViewer::new();
 //!     viewer.set_molecule(mol);
 //!
 //!     // Access molecule data
