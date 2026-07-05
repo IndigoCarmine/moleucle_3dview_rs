@@ -22,7 +22,7 @@ fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortE
             get_state_clone_by_type::<SelectedAtomRenderState>(&viewport.shared_states)
                 .unwrap_or_else(|| SelectedAtomRenderState {
                     selected_atoms: Vec::new(),
-                    color: [1.0, 0.0, 0.0],
+                    color: [1.0, 0.0, 0.0, 1.0],
                 });
         if let Some(_) = selected
             .selected_atoms
@@ -72,6 +72,17 @@ impl InteractiveMoleculeViewport {
         self.viewer.set_molecule(molecule);
     }
 
+    /// Update atom positions in place for trajectory playback (nanometer
+    /// units). See [`MoleculeViewer::update_positions`].
+    pub fn update_positions(&mut self, positions: &[Vec3]) -> Result<(), String> {
+        self.viewer.update_positions(positions)
+    }
+
+    /// Update atom positions in place from Ångström coordinates.
+    pub fn update_positions_angstrom(&mut self, coords: &[[f32; 3]]) -> Result<(), String> {
+        self.viewer.update_positions_angstrom(coords)
+    }
+
     pub fn register_event_handler(
         &mut self,
         handler: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent) + 'static>,
@@ -119,6 +130,32 @@ impl InteractiveMoleculeViewport {
         self.offscreen.set_render_style(render_style);
     }
 
+    /// Current whole-molecule opacity (`0.0..=1.0`).
+    pub fn molecule_opacity(&self) -> f32 {
+        self.viewer.molecule_opacity
+    }
+
+    /// Set the whole-molecule opacity (atoms + bonds), clamped to `0.0..=1.0`.
+    /// `1.0` is fully opaque; lower values fade the main molecule via alpha
+    /// blending. The additional-render overlays are unaffected.
+    pub fn set_molecule_opacity(&mut self, opacity: f32) {
+        self.viewer.set_molecule_opacity(opacity);
+    }
+
+    /// Override the per-atom sphere radius of the main molecule (atom order),
+    /// or pass `None` to use element-derived radii. Lets callers draw
+    /// coarse-grained beads through the built-in pipeline (so they participate
+    /// in shading, picking and opacity) instead of a separate overlay.
+    pub fn set_atom_radii(&mut self, radii: Option<Vec<f32>>) {
+        self.viewer.set_atom_radii(radii);
+    }
+
+    /// Override the per-atom RGBA color of the main molecule (atom order), or
+    /// pass `None` to use the color function.
+    pub fn set_atom_colors(&mut self, colors: Option<Vec<[f32; 4]>>) {
+        self.viewer.set_atom_colors(colors);
+    }
+
     pub fn free_egui_texture(&mut self, render_state: &egui_wgpu::RenderState) {
         self.offscreen.free_egui_texture(render_state);
     }
@@ -163,6 +200,11 @@ impl InteractiveMoleculeViewport {
             self.offscreen.render_style(),
             self.offscreen.mesh_resolution(),
             self.offscreen.is_low_mode(),
+            self.viewer.molecule_opacity,
+        )
+        .with_atom_attrs(
+            self.viewer.atom_radii.as_deref(),
+            self.viewer.atom_colors.as_deref(),
         );
 
         self.offscreen
@@ -210,28 +252,30 @@ impl InteractiveMoleculeViewport {
             if scroll.abs() > f32::EPSILON {
                 self.controller.camera.dolly(scroll * 0.02);
             }
+        }
 
-            let (delta, sec_down, mid_down, shift_down) = ctx.input(|i| {
-                (
-                    i.pointer.delta(),
-                    i.pointer.button_down(PointerButton::Secondary),
-                    i.pointer.button_down(PointerButton::Middle),
-                    i.modifiers.shift,
-                )
-            });
-
-            // Use raw pointer delta so secondary/middle drag works reliably on the image widget.
-            if sec_down || mid_down {
-                if mid_down || shift_down {
-                    self.controller
-                        .camera
-                        .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
-                } else {
-                    self.controller
-                        .camera
-                        .orbit(delta.x * 0.005, delta.y * 0.005);
-                }
+        // Primary drag: orbit (Shift+drag or middle/right drag: pan)
+        if response.dragged_by(PointerButton::Primary) {
+            let delta = response.drag_delta();
+            let shift_down = ctx.input(|i| i.modifiers.shift);
+            if shift_down {
+                self.controller
+                    .camera
+                    .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
+            } else {
+                self.controller
+                    .camera
+                    .orbit(delta.x * 0.005, delta.y * 0.005);
             }
+        }
+
+        if response.dragged_by(PointerButton::Secondary)
+            || response.dragged_by(PointerButton::Middle)
+        {
+            let delta = response.drag_delta();
+            self.controller
+                .camera
+                .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
         }
 
         if response.clicked_by(PointerButton::Primary) {

@@ -6,39 +6,29 @@ mod wireframe_style;
 use crate::viewer::ColorFn;
 use crate::Molecule;
 
-use super::{
-    CollectingVertexSink, OffscreenRendererPreference, RenderMesh, RenderStyle, Vertex,
-    VertexSink,
-};
+use super::{OffscreenRendererPreference, RenderMesh, RenderStyle, Vertex};
 
 pub(super) struct StyleBuildContext<'a> {
     pub(super) preference: OffscreenRendererPreference,
     pub(super) sphere_mesh: &'a RenderMesh,
     pub(super) cylinder_mesh: &'a RenderMesh,
+    /// Whole-molecule opacity in `0.0..=1.0`, folded into atom/bond alpha.
+    pub(super) molecule_opacity: f32,
+    /// Optional per-atom radius / RGBA color overrides (atom order); `None`
+    /// falls back to element-derived radii and `color_fn`.
+    pub(super) atom_radii: Option<&'a [f32]>,
+    pub(super) atom_colors: Option<&'a [[f32; 4]]>,
 }
 
 pub(super) trait MolecularRenderStyle {
     fn primitive_stride(&self) -> usize;
 
-    fn emit_vertices(
-        &self,
-        context: &StyleBuildContext<'_>,
-        molecule: Option<&Molecule>,
-        color_fn: ColorFn,
-        sink: &mut dyn VertexSink,
-    );
-
-    #[allow(dead_code)]
     fn build_vertices(
         &self,
         context: &StyleBuildContext<'_>,
         molecule: Option<&Molecule>,
         color_fn: ColorFn,
-    ) -> Vec<Vertex> {
-        let mut sink = CollectingVertexSink::new();
-        self.emit_vertices(context, molecule, color_fn, &mut sink);
-        sink.into_inner()
-    }
+    ) -> Vec<Vertex>;
 }
 
 pub(super) fn style_for(render_style: RenderStyle) -> &'static dyn MolecularRenderStyle {

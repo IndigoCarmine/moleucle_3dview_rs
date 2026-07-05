@@ -6,52 +6,33 @@ use crate::viewer::ColorFn;
 use crate::Molecule;
 use egui::TextureId;
 use egui_wgpu::wgpu;
-use lin_alg::f32::{Quaternion, Vec3};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use lin_alg::f32::Vec3;
 use wgpu::util::DeviceExt;
 
+mod gpu;
+mod lod;
 mod render_styles;
-use self::render_styles::circles::{build_circle_instances, CircleInstance};
-use self::render_styles::style_for;
+
+pub use lod::LodSettings;
+
+use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
+use gpu::{create_gpu_resources, upload_instances, GpuResources};
+use render_styles::circles::{
+    fill_circle_instances, fill_sphere_instances, CircleInstance, MAX_IMPOSTOR_INSTANCES,
+};
+use render_styles::{style_for, StyleBuildContext};
 
 const DEFAULT_MESH_RESOLUTION: usize = 3;
 const DEFAULT_BOND_CYLINDER_SIDES: usize = 12;
 const SAFE_MAX_VERTEX_BUFFER_BYTES: usize = 240 * 1024 * 1024;
 const MAX_RENDER_VERTICES: usize = SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<Vertex>();
 
-#[derive(Debug)]
-struct VertexBufferBatch {
-    buffer: wgpu::Buffer,
-    count: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LodSettings {
-    pub enabled: bool,
-    pub distance_check_fps: f32,
-    pub high_detail_max_distance: f32,
-    pub medium_detail_max_distance: f32,
-    pub high_detail_mesh_resolution: usize,
-    pub medium_detail_mesh_resolution: usize,
-    pub low_detail_mesh_resolution: usize,
-}
-
-impl Default for LodSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            distance_check_fps: 12.0,
-            high_detail_max_distance: 4.0,
-            medium_detail_max_distance: 10.0,
-            high_detail_mesh_resolution: 14,
-            medium_detail_mesh_resolution: 8,
-            low_detail_mesh_resolution: 4,
-        }
-    }
-}
+/// Vertices in the lowest-quality UV sphere (lat=3, lon=6): 3 * 6 quads * 6.
+const MIN_SPHERE_VERTICES_PER_ATOM: usize = 3 * 6 * 6;
+/// Above this atom count the mesh path cannot fit even at lowest quality, so
+/// the renderer auto-switches mesh styles to the sphere-impostor pipeline
+/// instead of silently truncating atoms.
+const MAX_MESH_ATOMS: usize = MAX_RENDER_VERTICES / MIN_SPHERE_VERTICES_PER_ATOM;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OffscreenRendererPreference {
@@ -95,6 +76,10 @@ impl OffscreenRendererPreference {
         self.render_style
     }
 
+    pub fn is_low_mode(&self) -> bool {
+        self.is_low_mode
+    }
+
     pub fn set_mesh_resolution(&mut self, mesh_resolution: usize) {
         self.mesh_resolution = mesh_resolution.max(3);
     }
@@ -106,106 +91,9 @@ impl OffscreenRendererPreference {
     pub fn set_render_style(&mut self, render_style: RenderStyle) {
         self.render_style = render_style;
     }
-}
 
-struct LodDistanceWorker {
-    distance_tx: mpsc::Sender<f32>,
-    resolution_rx: mpsc::Receiver<usize>,
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-    settings: Arc<Mutex<LodSettings>>,
-}
-
-impl LodDistanceWorker {
-    fn new(settings: Arc<Mutex<LodSettings>>) -> Self {
-        let (distance_tx, distance_rx) = mpsc::channel::<f32>();
-        let (resolution_tx, resolution_rx) = mpsc::channel::<usize>();
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let worker_settings = Arc::clone(&settings);
-
-        let handle = thread::spawn(move || {
-            let mut latest_distance = None;
-            let mut last_resolution = None;
-
-            while !worker_stop.load(Ordering::Relaxed) {
-                let interval = {
-                    let settings = worker_settings
-                        .lock()
-                        .ok()
-                        .map(|guard| *guard)
-                        .unwrap_or_default();
-                    let fps = settings.distance_check_fps.max(1.0);
-                    Duration::from_secs_f32(1.0 / fps)
-                };
-
-                match distance_rx.recv_timeout(interval) {
-                    Ok(distance) => {
-                        latest_distance = Some(distance);
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-
-                while let Ok(distance) = distance_rx.try_recv() {
-                    latest_distance = Some(distance);
-                }
-
-                let Some(distance) = latest_distance else {
-                    continue;
-                };
-
-                let settings = worker_settings
-                    .lock()
-                    .ok()
-                    .map(|guard| *guard)
-                    .unwrap_or_default();
-                if !settings.enabled {
-                    continue;
-                }
-
-                let resolution = resolution_for_distance(distance, settings);
-                if last_resolution != Some(resolution) {
-                    let _ = resolution_tx.send(resolution);
-                    last_resolution = Some(resolution);
-                }
-            }
-        });
-
-        Self {
-            distance_tx,
-            resolution_rx,
-            stop,
-            handle: Some(handle),
-            settings,
-        }
-    }
-
-    fn submit_distance(&self, distance: f32) {
-        let _ = self.distance_tx.send(distance);
-    }
-
-    fn set_settings(&self, settings: LodSettings) {
-        if let Ok(mut guard) = self.settings.lock() {
-            *guard = settings;
-        }
-    }
-
-    fn poll_resolution(&self) -> Option<usize> {
-        let mut latest = None;
-        while let Ok(resolution) = self.resolution_rx.try_recv() {
-            latest = Some(resolution);
-        }
-        latest
-    }
-}
-
-impl Drop for LodDistanceWorker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+    pub fn set_is_low_mode(&mut self, low: bool) {
+        self.is_low_mode = low;
     }
 }
 
@@ -219,105 +107,37 @@ pub enum RenderStyle {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct Vertex {
+struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
-    color: [f32; 3],
-}
-
-pub(super) trait VertexSink {
-    fn push_vertex(&mut self, vertex: Vertex);
-}
-
-struct CollectingVertexSink {
-    vertices: Vec<Vertex>,
-}
-
-impl CollectingVertexSink {
-    fn new() -> Self {
-        Self { vertices: Vec::new() }
-    }
-
-    fn into_inner(self) -> Vec<Vertex> {
-        self.vertices
-    }
-}
-
-impl VertexSink for CollectingVertexSink {
-    fn push_vertex(&mut self, vertex: Vertex) {
-        self.vertices.push(vertex);
-    }
-}
-
-struct BatchingVertexSink<'a> {
-    device: &'a wgpu::Device,
-    label_prefix: &'a str,
-    primitive_stride: usize,
-    batch_vertex_limit: usize,
-    vertices: Vec<Vertex>,
-    batches: Vec<VertexBufferBatch>,
-}
-
-impl<'a> BatchingVertexSink<'a> {
-    fn new(device: &'a wgpu::Device, label_prefix: &'a str, primitive_stride: usize) -> Self {
-        let primitive_stride = primitive_stride.max(1);
-        let mut batch_vertex_limit = MAX_RENDER_VERTICES.max(primitive_stride);
-        batch_vertex_limit -= batch_vertex_limit % primitive_stride;
-        if batch_vertex_limit == 0 {
-            batch_vertex_limit = primitive_stride;
-        }
-
-        Self {
-            device,
-            label_prefix,
-            primitive_stride,
-            batch_vertex_limit,
-            vertices: Vec::new(),
-            batches: Vec::new(),
-        }
-    }
-
-    fn finish(mut self) -> Vec<VertexBufferBatch> {
-        self.flush();
-        self.batches
-    }
-
-    fn flush(&mut self) {
-        if self.vertices.is_empty() {
-            return;
-        }
-
-        let batch_index = self.batches.len();
-        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{}-{batch_index}", self.label_prefix)),
-            contents: bytemuck::cast_slice(&self.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        self.batches.push(VertexBufferBatch {
-            buffer,
-            count: self.vertices.len() as u32,
-        });
-        self.vertices.clear();
-    }
-}
-
-impl<'a> VertexSink for BatchingVertexSink<'a> {
-    fn push_vertex(&mut self, vertex: Vertex) {
-        self.vertices.push(vertex);
-
-        if self.vertices.len() >= self.batch_vertex_limit
-            && self.vertices.len() % self.primitive_stride == 0
-        {
-            self.flush();
-        }
-    }
+    color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CircleQuadVertex {
     corner: [f32; 2],
+}
+
+/// Per-vertex data for the unit cylinder reused by every instanced bond.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BondMeshVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+}
+
+/// Per-bond instance data. One cylinder mesh is drawn once per bond via GPU
+/// instancing, so a molecule's bonds cost a single small mesh plus this packed
+/// array instead of duplicating cylinder geometry per bond on the CPU.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BondInstance {
+    mid: [f32; 3],
+    radius: f32,
+    axis: [f32; 3],
+    length: f32,
+    color: [f32; 4],
 }
 
 #[repr(C)]
@@ -332,63 +152,24 @@ struct Uniforms {
     camera_forward: [f32; 4],
 }
 
-struct GpuResources {
-    pipeline: wgpu::RenderPipeline,
-    additional_pipeline: wgpu::RenderPipeline,
-    wire_pipeline: wgpu::RenderPipeline,
-    circles_pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
-    vertex_batches: Vec<VertexBufferBatch>,
-    circles_quad_buffer: wgpu::Buffer,
-    circles_instance_buffer: Option<wgpu::Buffer>,
-    circles_instance_count: u32,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GeometryCacheKey {
-    /// Hash of molecule *content* (atom positions/elements + bonds). Using a content
-    /// hash rather than the molecule's address means in-place geometry updates
-    /// (e.g. animating an MM minimization via repeated `set_molecule`) correctly
-    /// invalidate the cached geometry.
-    molecule_hash: u64,
+    molecule_ptr: usize,
+    /// Changes when atom positions are updated in place (trajectory playback),
+    /// so the cached geometry rebuilds even though the molecule pointer is the
+    /// same object.
+    generation: u64,
     render_style: RenderStyle,
     color_fn_ptr: usize,
     mesh_resolution: usize,
-}
-
-/// Hash the geometry-relevant content of a molecule so the renderer rebuilds its
-/// vertex buffers whenever atom positions, elements, or bonds change.
-fn molecule_geometry_hash(molecule: Option<&Molecule>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    match molecule {
-        None => 0u8.hash(&mut hasher),
-        Some(mol) => {
-            mol.atoms.len().hash(&mut hasher);
-            for atom in &mol.atoms {
-                atom.element.hash(&mut hasher);
-                atom.position.x.to_bits().hash(&mut hasher);
-                atom.position.y.to_bits().hash(&mut hasher);
-                atom.position.z.to_bits().hash(&mut hasher);
-            }
-            mol.bonds.len().hash(&mut hasher);
-            for bond in &mol.bonds {
-                bond.atom_a.hash(&mut hasher);
-                bond.atom_b.hash(&mut hasher);
-                bond.order.hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BallstickQuality {
-    High,
-    Medium,
-    Low,
+    /// Molecule opacity as raw bits (f32 isn't `Eq`); changing it must rebuild
+    /// the baked-in vertex/instance alpha.
+    molecule_opacity_bits: u32,
+    /// Identity (pointer + length) of the per-atom radius / color overrides, so
+    /// swapping or clearing them rebuilds the geometry. Matches the pointer-based
+    /// invalidation already used for `molecule_ptr`.
+    atom_radii_id: (usize, usize),
+    atom_colors_id: (usize, usize),
 }
 
 pub struct OffscreenRenderer {
@@ -402,8 +183,12 @@ pub struct OffscreenRenderer {
     sphere_mesh: RenderMesh,
     cylinder_mesh: RenderMesh,
     geometry_cache_key: Option<GeometryCacheKey>,
-    lod_worker: LodDistanceWorker,
+    lod: lod::LodManager,
     additional_renders: Vec<Box<dyn AdditionalRender>>,
+    /// Reusable CPU scratch buffers for impostor/bond instances, kept across
+    /// frames so trajectory playback refills them without reallocating.
+    scratch_circle_instances: Vec<CircleInstance>,
+    scratch_bond_instances: Vec<BondInstance>,
 }
 
 impl OffscreenRenderer {
@@ -427,16 +212,15 @@ impl OffscreenRenderer {
     }
 
     pub fn new_with_preference(preference: OffscreenRendererPreference) -> Self {
-        let mesh_resolution = preference.mesh_resolution();
-        let mesh_resolution = mesh_resolution.max(3);
+        let mesh_resolution = preference.mesh_resolution().max(3);
         let sphere_lat = mesh_resolution;
         let sphere_lon = mesh_resolution * 2;
         let cylinder_sides = DEFAULT_BOND_CYLINDER_SIDES;
-        let lod_settings = Arc::new(Mutex::new(preference.lod_settings()));
 
         Self {
             width: 0,
             height: 0,
+            lod: lod::LodManager::new(preference.lod_settings()),
             preference,
             color_texture: None,
             depth_texture: None,
@@ -445,8 +229,9 @@ impl OffscreenRenderer {
             sphere_mesh: RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon),
             cylinder_mesh: RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides),
             geometry_cache_key: None,
-            lod_worker: LodDistanceWorker::new(lod_settings),
             additional_renders: Vec::new(),
+            scratch_circle_instances: Vec::new(),
+            scratch_bond_instances: Vec::new(),
         }
     }
 
@@ -479,7 +264,7 @@ impl OffscreenRenderer {
         }
 
         self.preference.set_lod_settings(lod_settings);
-        self.lod_worker.set_settings(lod_settings);
+        self.lod.update_settings(lod_settings);
         self.geometry_cache_key = None;
     }
 
@@ -488,7 +273,7 @@ impl OffscreenRenderer {
     }
 
     pub fn is_low_mode(&self) -> bool {
-        self.preference.is_low_mode
+        self.preference.is_low_mode()
     }
 
     pub fn set_render_style(&mut self, render_style: RenderStyle) {
@@ -496,6 +281,11 @@ impl OffscreenRenderer {
             self.preference.set_render_style(render_style);
             self.geometry_cache_key = None;
         }
+    }
+
+    pub fn set_is_low_mode(&mut self, low: bool) {
+        self.preference.set_is_low_mode(low);
+        self.geometry_cache_key = None;
     }
 
     pub fn preference(&self) -> OffscreenRendererPreference {
@@ -509,6 +299,7 @@ impl OffscreenRenderer {
 
         let mesh_resolution_changed =
             self.preference.mesh_resolution() != preference.mesh_resolution();
+        let lod_changed = self.preference.lod_settings() != preference.lod_settings();
         self.preference = preference;
 
         if mesh_resolution_changed {
@@ -518,6 +309,10 @@ impl OffscreenRenderer {
             let cylinder_sides = DEFAULT_BOND_CYLINDER_SIDES;
             self.sphere_mesh = RenderMesh::new_sphere_uv(1.0, sphere_lat, sphere_lon);
             self.cylinder_mesh = RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides);
+        }
+
+        if lod_changed {
+            self.lod.update_settings(self.preference.lod_settings());
         }
 
         self.geometry_cache_key = None;
@@ -567,27 +362,6 @@ impl OffscreenRenderer {
         }
     }
 
-    #[allow(dead_code)]
-    fn upload_vertex_batches(
-        device: &wgpu::Device,
-        label_prefix: &str,
-        vertices: Vec<Vertex>,
-        primitive_stride: usize,
-    ) -> Vec<VertexBufferBatch> {
-        let mut sink = BatchingVertexSink::new(device, label_prefix, primitive_stride);
-        for vertex in vertices {
-            sink.push_vertex(vertex);
-        }
-        sink.finish()
-    }
-
-    fn draw_vertex_batches(pass: &mut wgpu::RenderPass<'_>, batches: &[VertexBufferBatch]) {
-        for batch in batches {
-            pass.set_vertex_buffer(0, batch.buffer.slice(..));
-            pass.draw(0..batch.count, 0..1);
-        }
-    }
-
     pub fn render_frame_with_state(
         &mut self,
         render_state: &egui_wgpu::RenderState,
@@ -607,27 +381,64 @@ impl OffscreenRenderer {
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let is_circles = matches!(self.preference.render_style(), RenderStyle::Circles);
-        let style = if is_circles {
+        let render_style = self.preference.render_style();
+        let atom_count = frame.molecule.map(|mol| mol.atoms.len()).unwrap_or(0);
+        // Mesh styles duplicate sphere geometry per atom and would overflow the
+        // vertex buffer past MAX_MESH_ATOMS, silently dropping atoms. Fall back
+        // to the instanced impostor pipeline so every atom is still drawn.
+        let mesh_overflow = matches!(render_style, RenderStyle::BallStick | RenderStyle::BallOnly)
+            && atom_count > MAX_MESH_ATOMS;
+        let use_impostors = matches!(render_style, RenderStyle::Circles) || mesh_overflow;
+
+        let style = if use_impostors {
             None
         } else {
-            Some(style_for(self.preference.render_style()))
+            Some(style_for(render_style))
         };
-        let cache_key = self.build_geometry_cache_key(frame.molecule, frame.color_fn);
-        let circles_instances = if is_circles {
-            Some(build_circle_instances(
-                frame.molecule,
-                frame.color_fn,
-                frame.camera_position,
-            ))
+
+        let cache_key = self.build_geometry_cache_key(frame);
+        let rebuilt_vertices = if !use_impostors && self.geometry_cache_key != Some(cache_key) {
+            if let Some(active_style) = style {
+                let ctx = StyleBuildContext {
+                    preference: self.preference,
+                    sphere_mesh: &self.sphere_mesh,
+                    cylinder_mesh: &self.cylinder_mesh,
+                    molecule_opacity: frame.molecule_opacity,
+                    atom_radii: frame.atom_radii,
+                    atom_colors: frame.atom_colors,
+                };
+                Some(active_style.build_vertices(&ctx, frame.molecule, frame.color_fn))
+            } else {
+                None
+            }
         } else {
             None
         };
-        let additional_batches: Vec<(
-            GpuPipeline,
-            Vec<VertexBufferBatch>,
-            Vec<SphereImpostorInstance>,
-        )> = self
+
+        // Impostor instances don't depend on the camera, so rebuild them only
+        // when the molecule/style/color/positions change — not every frame. The
+        // generation in cache_key catches in-place trajectory updates. Refill
+        // the reusable scratch Vecs (moved out to avoid reallocation) so an
+        // idle 500k-atom view, and equal-size trajectory frames, don't churn.
+        let cache_miss = self.geometry_cache_key != Some(cache_key);
+        let rebuild_impostors = use_impostors && cache_miss;
+
+        // When BallStick falls back to impostors, render its bonds via the
+        // instanced cylinder pipeline (one instance per bond) so connectivity
+        // still shows at a scale where the per-bond CPU mesh would overflow.
+        let bonds_as_instances = mesh_overflow && matches!(render_style, RenderStyle::BallStick);
+        let rebuild_bonds = bonds_as_instances && cache_miss;
+
+        let mut circle_scratch = std::mem::take(&mut self.scratch_circle_instances);
+        let mut bond_scratch = std::mem::take(&mut self.scratch_bond_instances);
+        if rebuild_impostors {
+            Self::fill_impostor_instances(&mut circle_scratch, render_style, frame);
+        }
+        if rebuild_bonds {
+            Self::fill_bond_instances(&mut bond_scratch, frame);
+        }
+
+        let additional_batches: Vec<(GpuPipeline, Vec<Vertex>, Vec<SphereImpostorInstance>)> = self
             .additional_renders
             .iter()
             .map(|additional| {
@@ -637,65 +448,61 @@ impl OffscreenRenderer {
                     sphere_impostors: Vec::new(),
                 };
                 additional.update_scene(&mut additional_scene, frame);
-                let primitive_stride = match additional.gpu_pipeline() {
-                    GpuPipeline::Triangles => 3,
-                    GpuPipeline::Wireframe => 2,
-                    GpuPipeline::SphereImpostor => 3,
-                };
-                let mut sink = BatchingVertexSink::new(
-                    &render_state.device,
-                    "offscreen-additional-vertex-buffer",
-                    primitive_stride,
-                );
-                self.emit_additional_scene_vertices(&additional_scene, &mut sink);
-
                 (
                     additional.gpu_pipeline(),
-                    sink.finish(),
+                    self.build_additional_scene_vertices(&additional_scene),
                     additional_scene.sphere_impostors,
                 )
             })
             .collect();
-
-        let vertex_batches = if !is_circles && self.geometry_cache_key != Some(cache_key) {
-            let primitive_stride = style
-                .map(|active_style| active_style.primitive_stride())
-                .unwrap_or(3);
-            let mut sink = BatchingVertexSink::new(
-                &render_state.device,
-                "offscreen-vertex-buffer",
-                primitive_stride,
-            );
-            self.emit_scene_vertices(frame.molecule, frame.color_fn, &mut sink);
-            Some(sink.finish())
-        } else {
-            None
-        };
 
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| "Offscreen GPU resources are not initialized".to_string())?;
 
-        if let Some(vertex_batches) = vertex_batches {
-            gpu.vertex_batches = vertex_batches;
+        if let Some(mut vertices) = rebuilt_vertices {
+            let primitive_stride = style
+                .map(|active_style| active_style.primitive_stride())
+                .unwrap_or(3);
+
+            if vertices.len() > MAX_RENDER_VERTICES {
+                let capped = MAX_RENDER_VERTICES - (MAX_RENDER_VERTICES % primitive_stride);
+                vertices.truncate(capped);
+            }
+
+            gpu.vertex_count = upload_instances(
+                &render_state.device,
+                &render_state.queue,
+                &mut gpu.vertex_buffer,
+                &mut gpu.vertex_capacity,
+                "offscreen-vertex-buffer",
+                &vertices,
+            );
             self.geometry_cache_key = Some(cache_key);
         }
 
-        if let Some(instances) = circles_instances {
-            if instances.is_empty() {
-                gpu.circles_instance_buffer = None;
-                gpu.circles_instance_count = 0;
-            } else {
-                gpu.circles_instance_count = instances.len() as u32;
-                gpu.circles_instance_buffer = Some(render_state.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("offscreen-circles-instance-buffer"),
-                        contents: bytemuck::cast_slice(&instances),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    },
-                ));
-            }
+        if rebuild_impostors {
+            gpu.circles_instance_count = upload_instances(
+                &render_state.device,
+                &render_state.queue,
+                &mut gpu.circles_instance_buffer,
+                &mut gpu.circles_instance_capacity,
+                "offscreen-circles-instance-buffer",
+                &circle_scratch,
+            );
+            self.geometry_cache_key = Some(cache_key);
+        }
+
+        if rebuild_bonds {
+            gpu.bond_instance_count = upload_instances(
+                &render_state.device,
+                &render_state.queue,
+                &mut gpu.bond_instance_buffer,
+                &mut gpu.bond_instance_capacity,
+                "offscreen-bond-instance-buffer",
+                &bond_scratch,
+            );
             self.geometry_cache_key = Some(cache_key);
         }
 
@@ -760,45 +567,73 @@ impl OffscreenRenderer {
                 multiview_mask: None,
             });
 
-            let pipeline = match self.preference.render_style() {
-                RenderStyle::BallStick if self.preference.is_low_mode => &gpu.wire_pipeline,
-                RenderStyle::BallStick => &gpu.pipeline,
-                RenderStyle::BallOnly => &gpu.pipeline,
-                RenderStyle::Circles => &gpu.circles_pipeline,
-                RenderStyle::Wireframe => &gpu.wire_pipeline,
+            let pipeline = if use_impostors {
+                &gpu.circles_pipeline
+            } else {
+                match self.preference.render_style() {
+                    RenderStyle::BallStick if self.preference.is_low_mode() => &gpu.wire_pipeline,
+                    RenderStyle::BallStick => &gpu.pipeline,
+                    RenderStyle::BallOnly => &gpu.pipeline,
+                    RenderStyle::Circles => &gpu.circles_pipeline,
+                    RenderStyle::Wireframe => &gpu.wire_pipeline,
+                }
             };
 
             pass.set_pipeline(pipeline);
 
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
-            if is_circles {
+            if use_impostors {
                 if let Some(instance_buffer) = &gpu.circles_instance_buffer {
                     pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
                     pass.set_vertex_buffer(1, instance_buffer.slice(..));
                     pass.draw(0..6, 0..gpu.circles_instance_count);
                 }
-            } else if !gpu.vertex_batches.is_empty() {
-                Self::draw_vertex_batches(&mut pass, &gpu.vertex_batches);
+
+                // Instanced bonds for the BallStick large-molecule fallback.
+                if bonds_as_instances {
+                    if let Some(bond_buffer) = &gpu.bond_instance_buffer {
+                        if gpu.bond_instance_count > 0 {
+                            pass.set_pipeline(&gpu.bond_pipeline);
+                            pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
+                            pass.set_vertex_buffer(1, bond_buffer.slice(..));
+                            pass.draw(
+                                0..gpu.bond_mesh_vertex_count,
+                                0..gpu.bond_instance_count,
+                            );
+                        }
+                    }
+                }
+            } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.draw(0..gpu.vertex_count, 0..1);
             }
 
-            for (pipeline_kind, additional_vertex_batches, additional_sphere_impostors) in
+            for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
                 additional_batches.into_iter()
             {
-                if !additional_vertex_batches.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
+                if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
+                    let additional_vertex_buffer = render_state.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("offscreen-additional-vertex-buffer"),
+                            contents: bytemuck::cast_slice(&additional_vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    );
+
                     let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind);
                     pass.set_pipeline(pipeline);
-                    Self::draw_vertex_batches(&mut pass, &additional_vertex_batches);
+                    pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
+                    pass.draw(0..additional_vertices.len() as u32, 0..1);
                 }
 
                 if !additional_sphere_impostors.is_empty() {
-                    let sphere_instance_buffer =
-                        render_state
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("offscreen-additional-sphere-instance-buffer"),
-                                contents: bytemuck::cast_slice(&additional_sphere_impostors),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                    let sphere_instance_buffer = render_state.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("offscreen-additional-sphere-instance-buffer"),
+                            contents: bytemuck::cast_slice(&additional_sphere_impostors),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    );
 
                     let pipeline = Self::additional_pipeline_for(gpu, GpuPipeline::SphereImpostor);
                     pass.set_pipeline(pipeline);
@@ -810,6 +645,11 @@ impl OffscreenRenderer {
         }
 
         render_state.queue.submit(std::iter::once(encoder.finish()));
+
+        // Return the scratch buffers (with their grown capacity) so the next
+        // frame refills them without reallocating.
+        self.scratch_circle_instances = circle_scratch;
+        self.scratch_bond_instances = bond_scratch;
         Ok(())
     }
 
@@ -833,17 +673,18 @@ impl OffscreenRenderer {
             additionalstate.as_ref(),
             self.preference.render_style(),
             self.preference.mesh_resolution(),
-            self.preference.is_low_mode,
+            self.preference.is_low_mode(),
+            1.0,
         );
         self.render_frame_with_state(render_state, &frame)
     }
 
     pub fn submit_lod_distance(&self, distance: f32) {
-        self.lod_worker.submit_distance(distance);
+        self.lod.submit_distance(distance);
     }
 
     fn apply_pending_lod_resolution(&mut self) {
-        let Some(target_resolution) = self.lod_worker.poll_resolution() else {
+        let Some(target_resolution) = self.lod.poll_resolution() else {
             return;
         };
 
@@ -913,34 +754,111 @@ impl OffscreenRenderer {
         self.depth_texture = Some(depth_texture);
     }
 
-    fn build_geometry_cache_key(
-        &self,
-        molecule: Option<&Molecule>,
-        color_fn: ColorFn,
-    ) -> GeometryCacheKey {
-        GeometryCacheKey {
-            molecule_hash: molecule_geometry_hash(molecule),
-            render_style: self.preference.render_style(),
-            color_fn_ptr: color_fn as usize,
-            mesh_resolution: self.preference.mesh_resolution(),
-        }
-    }
-
-    fn emit_scene_vertices(&self, molecule: Option<&Molecule>, color_fn: ColorFn, sink: &mut dyn VertexSink) {
-        if matches!(self.preference.render_style(), RenderStyle::Circles) {
+    /// Fill `out` with one cylinder instance per bond for the instanced bond
+    /// pipeline. Used by the large-molecule BallStick fallback so bonds still
+    /// render at a scale where the per-bond CPU mesh path would overflow the
+    /// vertex buffer. `out`'s capacity is reused across frames.
+    fn fill_bond_instances(out: &mut Vec<BondInstance>, frame: &RenderFrameState<'_>) {
+        out.clear();
+        let Some(mol) = frame.molecule else {
             return;
-        }
-
-        let style_context = render_styles::StyleBuildContext {
-            preference: self.preference,
-            sphere_mesh: &self.sphere_mesh,
-            cylinder_mesh: &self.cylinder_mesh,
         };
-        let style = style_for(self.preference.render_style());
-        style.emit_vertices(&style_context, molecule, color_fn, sink);
+
+        let radius = default_ball_stick_bond_radius();
+        let color = [0.55, 0.55, 0.55, 1.0];
+        out.reserve(mol.bonds.len().min(MAX_IMPOSTOR_INSTANCES));
+
+        for bond in &mol.bonds {
+            if out.len() >= MAX_IMPOSTOR_INSTANCES {
+                break;
+            }
+            let a = mol.atoms[bond.atom_a].position;
+            let b = mol.atoms[bond.atom_b].position;
+            let diff = b - a;
+            let len = diff.magnitude();
+            if len < 1e-4 {
+                continue;
+            }
+            let axis = diff / len;
+            let mid = (a + b) * 0.5;
+            out.push(BondInstance {
+                mid: [mid.x, mid.y, mid.z],
+                radius,
+                axis: [axis.x, axis.y, axis.z],
+                length: len,
+                color,
+            });
+        }
     }
 
-    fn emit_additional_scene_vertices(&self, scene: &Scene, sink: &mut dyn VertexSink) {
+    /// Fill `out` with sphere-impostor instances for the active style, choosing
+    /// a radius that matches the mesh each style would otherwise draw. `out`'s
+    /// capacity is reused across frames.
+    fn fill_impostor_instances(
+        out: &mut Vec<CircleInstance>,
+        render_style: RenderStyle,
+        frame: &RenderFrameState<'_>,
+    ) {
+        let opacity = frame.molecule_opacity;
+        let radii = frame.atom_radii;
+        let colors = frame.atom_colors;
+        match render_style {
+            RenderStyle::Circles => {
+                fill_circle_instances(out, frame.molecule, frame.color_fn, opacity, radii, colors)
+            }
+            RenderStyle::BallOnly => {
+                fill_sphere_instances(
+                    out,
+                    frame.molecule,
+                    frame.color_fn,
+                    opacity,
+                    radii,
+                    colors,
+                    |atom| vdw_radius(&atom.element),
+                )
+            }
+            // BallStick falls back here only when the mesh path would overflow;
+            // bonds are dropped at that scale, but every atom is still shown.
+            RenderStyle::BallStick => {
+                fill_sphere_instances(
+                    out,
+                    frame.molecule,
+                    frame.color_fn,
+                    opacity,
+                    radii,
+                    colors,
+                    |atom| ball_stick_radius(&atom.element, false),
+                )
+            }
+            RenderStyle::Wireframe => out.clear(),
+        }
+    }
+
+    fn build_geometry_cache_key(&self, frame: &RenderFrameState<'_>) -> GeometryCacheKey {
+        let slice_id = |s: Option<&[f32]>| s.map(|s| (s.as_ptr() as usize, s.len())).unwrap_or((0, 0));
+        let color_id = frame
+            .atom_colors
+            .map(|s| (s.as_ptr() as usize, s.len()))
+            .unwrap_or((0, 0));
+        GeometryCacheKey {
+            molecule_ptr: frame
+                .molecule
+                .map(|mol| mol as *const Molecule as usize)
+                .unwrap_or(0),
+            generation: frame.molecule.map(|mol| mol.generation()).unwrap_or(0),
+            render_style: self.preference.render_style(),
+            color_fn_ptr: frame.color_fn as usize,
+            mesh_resolution: self.preference.mesh_resolution(),
+            molecule_opacity_bits: frame.molecule_opacity.to_bits(),
+            atom_radii_id: slice_id(frame.atom_radii),
+            atom_colors_id: color_id,
+        }
+    }
+
+    fn build_additional_scene_vertices(&self, scene: &Scene) -> Vec<Vertex> {
+        let max_vertices = MAX_RENDER_VERTICES;
+        let mut vertices = Vec::new();
+
         for entity in &scene.entities {
             let Some(mesh) = scene.meshes.get(entity.mesh) else {
                 continue;
@@ -950,12 +868,23 @@ impl OffscreenRenderer {
                 entity
                     .scale_partial
                     .unwrap_or(Vec3::new(entity.scale, entity.scale, entity.scale));
-            let color = [entity.color.0, entity.color.1, entity.color.2];
+            // Fold the entity's opacity into the color's alpha channel so both
+            // per-color alpha and the entity-wide opacity affect blending.
+            let color = [
+                entity.color.0,
+                entity.color.1,
+                entity.color.2,
+                entity.color.3 * entity.opacity,
+            ];
 
             for tri in mesh.indices.chunks_exact(3) {
+                if vertices.len().saturating_add(3) > max_vertices {
+                    return vertices;
+                }
+
                 for &idx in tri {
                     let Some(src) = mesh.vertices.get(idx) else {
-                        return;
+                        return vertices;
                     };
 
                     let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
@@ -965,7 +894,7 @@ impl OffscreenRenderer {
                     let n = src.normal;
                     let n_world = entity.orientation.rotate_vec(n).to_normalized();
 
-                    sink.push_vertex(Vertex {
+                    vertices.push(Vertex {
                         position: [p_world.x, p_world.y, p_world.z],
                         normal: [n_world.x, n_world.y, n_world.z],
                         color,
@@ -973,554 +902,15 @@ impl OffscreenRenderer {
                 }
             }
         }
-    }
 
+        vertices
+    }
 }
 
 impl Default for OffscreenRenderer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
-    let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("offscreen-uniform-layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    });
-
-    let initial_uniforms = Uniforms {
-        view_proj: [
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ],
-        viewport: [1.0, 1.0],
-        focal: 1.0,
-        _pad: 0.0,
-        camera_right: [1.0, 0.0, 0.0, 0.0],
-        camera_up: [0.0, 1.0, 0.0, 0.0],
-        camera_forward: [0.0, 0.0, 1.0, 0.0],
-    };
-    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("offscreen-uniform-buffer"),
-        contents: bytemuck::bytes_of(&initial_uniforms),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("offscreen-uniform-bind-group"),
-        layout: &uniform_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform_buffer.as_entire_binding(),
-        }],
-    });
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("offscreen-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            r#"
-struct VSOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) depth01: f32,
-};
-
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    viewport: vec2<f32>,
-    focal: f32,
-    _pad: f32,
-    camera_right: vec4<f32>,
-    camera_up: vec4<f32>,
-    camera_forward: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-@vertex
-fn vs_main(
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
-) -> VSOut {
-    var out: VSOut;
-    let clip = uniforms.view_proj * vec4<f32>(position, 1.0);
-    out.position = clip;
-    out.color = color;
-    out.normal = normal;
-    out.depth01 = clip.z / clip.w * 0.5 + 0.5;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
-    let diffuse = max(dot(n, l), 0.0);
-    let ambient = 0.22;
-    let standard_lit = in.color * (ambient + 0.78 * diffuse);
-
-    // For deeper fragments, blend toward a sphere-like radial tone.
-    let depth01 = clamp(in.depth01, 0.0, 1.0);
-    let deep_factor = smoothstep(0.60, 0.98, depth01);
-    let radial = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
-
-    let core = in.color * 1.05 + vec3<f32>(0.10, 0.10, 0.10);
-    let mid = in.color;
-    let edge = in.color * 0.28;
-    let center_mix = smoothstep(0.55, 1.0, radial);
-    let radial_mix = smoothstep(0.05, 0.85, radial);
-    var sphere_tone = mix(edge, mix(mid, core, center_mix), radial_mix);
-
-    // Darker rim to emulate the sample's white->base->black feel.
-    let rim = mix(0.72, 1.0, smoothstep(0.0, 0.55, radial));
-    sphere_tone = sphere_tone * rim;
-
-    let lit = mix(standard_lit, sphere_tone, deep_factor);
-    return vec4<f32>(lit, 1.0);
-}
-"#
-            .into(),
-        ),
-    });
-
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("offscreen-layout"),
-        bind_group_layouts: &[Some(&uniform_layout)],
-        immediate_size: 0,
-    });
-
-    let pipeline = create_triangle_pipeline(device, &layout, &shader, "offscreen-pipeline");
-    let additional_pipeline =
-        create_triangle_pipeline(device, &layout, &shader, "offscreen-additional-pipeline");
-
-    let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("offscreen-wire-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            r#"
-struct VSOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
-};
-
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    viewport: vec2<f32>,
-    focal: f32,
-    _pad: f32,
-    camera_right: vec4<f32>,
-    camera_up: vec4<f32>,
-    camera_forward: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-@vertex
-fn vs_main(
-    @location(0) position: vec3<f32>,
-    @location(1) _normal: vec3<f32>,
-    @location(2) color: vec3<f32>,
-) -> VSOut {
-    var out: VSOut;
-    out.position = uniforms.view_proj * vec4<f32>(position, 1.0);
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
-}
-"#
-            .into(),
-        ),
-    });
-
-    let wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-wire-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &wire_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: std::mem::size_of::<[f32; 3]>() as u64,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
-                        shader_location: 2,
-                    },
-                ],
-            }],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &wire_shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::LineList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-
-    let circles_pipeline = create_circles_pipeline(device, &layout);
-    let circles_quad_vertices = [
-        CircleQuadVertex {
-            corner: [-1.0, -1.0],
-        },
-        CircleQuadVertex {
-            corner: [1.0, -1.0],
-        },
-        CircleQuadVertex { corner: [1.0, 1.0] },
-        CircleQuadVertex {
-            corner: [-1.0, -1.0],
-        },
-        CircleQuadVertex { corner: [1.0, 1.0] },
-        CircleQuadVertex {
-            corner: [-1.0, 1.0],
-        },
-    ];
-    let circles_quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("offscreen-circles-quad-buffer"),
-        contents: bytemuck::cast_slice(&circles_quad_vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-
-    GpuResources {
-        pipeline,
-        additional_pipeline,
-        wire_pipeline,
-        circles_pipeline,
-        uniform_buffer,
-        uniform_bind_group,
-        vertex_batches: Vec::new(),
-        circles_quad_buffer,
-        circles_instance_buffer: None,
-        circles_instance_count: 0,
-    }
-}
-
-fn create_triangle_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    label: &str,
-) -> wgpu::RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: std::mem::size_of::<[f32; 3]>() as u64,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
-                        shader_location: 2,
-                    },
-                ],
-            }],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
-fn create_circles_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("offscreen-circles-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            r#"
-struct Uniforms {
-    view_proj: mat4x4<f32>,
-    viewport: vec2<f32>,
-    focal: f32,
-    _pad: f32,
-    camera_right: vec4<f32>,
-    camera_up: vec4<f32>,
-    camera_forward: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-struct VSOut {
-    @builtin(position) position: vec4<f32>,
-
-    // sphere center in world/view space
-    @location(0) center: vec3<f32>,
-
-    @location(1) radius: f32,
-    @location(2) color: vec3<f32>,
-    @location(3) local: vec2<f32>,
-};
-
-struct FSOut {
-    @location(0) color: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
-};
-
-@vertex
-fn vs_main(
-    @location(0) corner: vec2<f32>,
-    @location(1) center: vec3<f32>,
-    @location(2) radius: f32,
-    @location(3) color: vec3<f32>,
-) -> VSOut {
-    var out: VSOut;
-
-    let clip_center =
-        uniforms.view_proj * vec4<f32>(center, 1.0);
-
-    let inv_w =
-        1.0 / max(abs(clip_center.w), 0.0001);
-
-    let ndc_radius =
-        radius
-        * uniforms.focal
-        * inv_w;
-
-    let aspect =
-        uniforms.viewport.x
-        / max(uniforms.viewport.y, 0.0001);
-
-    // clip-space billboard offset
-    let corner_clip =
-        vec2<f32>(
-            corner.x / aspect,
-            corner.y,
-        );
-
-    let clip_offset =
-        corner_clip
-        * ndc_radius
-        * clip_center.w;
-
-    out.position = vec4<f32>(
-        clip_center.xy + clip_offset,
-        clip_center.z,
-        clip_center.w,
-    );
-
-    out.center = center;
-    out.radius = radius;
-    out.color = color;
-
-    // IMPORTANT:
-    // local coordinates must remain unit-circle space
-    // DO NOT apply aspect correction here
-    out.local = corner;
-
-    return out;
-}
-
-@fragment
-fn fs_main(in: VSOut) -> FSOut {
-    var out: FSOut;
-
-    let xy = in.local;
-
-    let r2 = dot(xy, xy);
-
-    if (r2 > 1.0) {
-        discard;
-    }
-
-    let z = sqrt(1.0 - r2);
-
-    let normal =
-        vec3<f32>(xy, z);
-
-    let cam_right = uniforms.camera_right.xyz;
-    let cam_up = uniforms.camera_up.xyz;
-    let cam_forward = uniforms.camera_forward.xyz;
-
-    let sphere_offset =
-        cam_right * normal.x
-        + cam_up * normal.y
-        - cam_forward * normal.z;
-
-    let world_normal =
-        normalize(sphere_offset);
-
-    let sphere_pos =
-        in.center + world_normal * in.radius;
-
-    let clip =
-        uniforms.view_proj * vec4<f32>(sphere_pos, 1.0);
-
-    out.depth =
-        clip.z / clip.w * 0.5 + 0.5;
-
-    let light_dir =
-        normalize(vec3<f32>(0.3, 0.5, 1.0));
-
-    let diffuse =
-        max(dot(world_normal, light_dir), 0.0);
-
-    let ambient = 0.15;
-
-    let lit =
-        in.color * (ambient + diffuse * 0.85);
-
-    out.color = vec4<f32>(lit, 1.0);
-
-    return out;
-}
-"#
-            .into(),
-        ),
-    });
-
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-circles-pipeline"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[
-                wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<CircleQuadVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
-                },
-                wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<CircleInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32,
-                            offset: std::mem::size_of::<[f32; 3]>() as u64,
-                            shader_location: 2,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: std::mem::size_of::<[f32; 4]>() as u64,
-                            shader_location: 3,
-                        },
-                    ],
-                },
-            ],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
 }
 
 fn bond_line_offsets(order: usize) -> Vec<f32> {
@@ -1538,46 +928,43 @@ fn bond_line_offsets(order: usize) -> Vec<f32> {
 }
 
 fn append_mesh_triangles(
-    out: &mut dyn VertexSink,
+    out: &mut Vec<Vertex>,
     mesh: &RenderMesh,
-    position: Vec3,
-    orientation: Quaternion,
-    scale: Vec3,
-    color: [f32; 3],
+    position: lin_alg::f32::Vec3,
+    orientation: lin_alg::f32::Quaternion,
+    scale: lin_alg::f32::Vec3,
+    color: [f32; 4],
+    max_vertices: usize,
 ) -> bool {
-    let inv_scale = Vec3::new(
-        if scale.x.abs() > 1e-6 {
-            1.0 / scale.x
-        } else {
-            0.0
-        },
-        if scale.y.abs() > 1e-6 {
-            1.0 / scale.y
-        } else {
-            0.0
-        },
-        if scale.z.abs() > 1e-6 {
-            1.0 / scale.z
-        } else {
-            0.0
-        },
+    let inv_scale = lin_alg::f32::Vec3::new(
+        if scale.x.abs() > 1e-6 { 1.0 / scale.x } else { 0.0 },
+        if scale.y.abs() > 1e-6 { 1.0 / scale.y } else { 0.0 },
+        if scale.z.abs() > 1e-6 { 1.0 / scale.z } else { 0.0 },
     );
 
     for tri in mesh.indices.chunks_exact(3) {
+        if out.len().saturating_add(3) > max_vertices {
+            return false;
+        }
+
         for &idx in tri {
             let Some(src) = mesh.vertices.get(idx) else {
                 return false;
             };
 
-            let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
-            let p_scaled = Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z);
+            let p = lin_alg::f32::Vec3::new(src.position[0], src.position[1], src.position[2]);
+            let p_scaled = lin_alg::f32::Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z);
             let p_world = orientation.rotate_vec(p_scaled) + position;
 
-            let n = Vec3::new(src.normal[0], src.normal[1], src.normal[2]);
-            let n_scaled = Vec3::new(n.x * inv_scale.x, n.y * inv_scale.y, n.z * inv_scale.z);
+            let n = lin_alg::f32::Vec3::new(src.normal[0], src.normal[1], src.normal[2]);
+            let n_scaled = lin_alg::f32::Vec3::new(
+                n.x * inv_scale.x,
+                n.y * inv_scale.y,
+                n.z * inv_scale.z,
+            );
             let n_world = orientation.rotate_vec(n_scaled).to_normalized();
 
-            out.push_vertex(Vertex {
+            out.push(Vertex {
                 position: [p_world.x, p_world.y, p_world.z],
                 normal: [n_world.x, n_world.y, n_world.z],
                 color,
@@ -1602,7 +989,7 @@ struct RenderMesh {
 impl RenderMesh {
     fn new_sphere_uv(radius: f32, lat_segments: usize, lon_segments: usize) -> Self {
         let vertex_count = (lat_segments + 1) * (lon_segments + 1);
-        let index_count = lat_segments * lon_segments * 6; // 2 triangles per quad
+        let index_count = lat_segments * lon_segments * 6;
 
         let mut vertices = Vec::with_capacity(vertex_count);
         let mut indices = Vec::with_capacity(index_count);
@@ -1622,7 +1009,7 @@ impl RenderMesh {
                 let x = radius * sin_t * cos_p;
                 let y = radius * cos_t;
                 let z = radius * sin_t * sin_p;
-                let n = Vec3::new(x, y, z).to_normalized();
+                let n = lin_alg::f32::Vec3::new(x, y, z).to_normalized();
 
                 vertices.push(RenderVertex {
                     position: [x, y, z],
@@ -1652,9 +1039,8 @@ impl RenderMesh {
     }
 
     fn new_cylinder_open_ended(len: f32, radius: f32, sides: usize) -> Self {
-        // Pre-calculate capacities
-        let vertex_capacity = sides * 2; // Side vertices only
-        let index_capacity = sides * 6; // Side quads (2 triangles each)
+        let vertex_capacity = sides * 2;
+        let index_capacity = sides * 6;
 
         let mut vertices = Vec::with_capacity(vertex_capacity);
         let mut indices = Vec::with_capacity(index_capacity);
@@ -1665,7 +1051,7 @@ impl RenderMesh {
             let angle = t * std::f32::consts::TAU;
             let x = radius * angle.cos();
             let z = radius * angle.sin();
-            let n = Vec3::new(x, 0.0, z).to_normalized();
+            let n = lin_alg::f32::Vec3::new(x, 0.0, z).to_normalized();
 
             vertices.push(RenderVertex {
                 position: [x, half, z],
@@ -1697,129 +1083,27 @@ impl RenderMesh {
 }
 
 fn append_line(
-    out: &mut dyn VertexSink,
-    a: Vec3,
-    b: Vec3,
-    color: [f32; 3],
+    out: &mut Vec<Vertex>,
+    a: lin_alg::f32::Vec3,
+    b: lin_alg::f32::Vec3,
+    color: [f32; 4],
+    max_vertices: usize,
 ) -> bool {
+    if out.len().saturating_add(2) > max_vertices {
+        return false;
+    }
+
     let normal = [0.0, 1.0, 0.0];
-    out.push_vertex(Vertex {
+    out.push(Vertex {
         position: [a.x, a.y, a.z],
         normal,
         color,
     });
-    out.push_vertex(Vertex {
+    out.push(Vertex {
         position: [b.x, b.y, b.z],
         normal,
         color,
     });
 
     true
-}
-
-fn resolution_for_distance(distance: f32, lod_settings: LodSettings) -> usize {
-    if distance <= lod_settings.high_detail_max_distance {
-        lod_settings.high_detail_mesh_resolution
-    } else if distance <= lod_settings.medium_detail_max_distance {
-        lod_settings.medium_detail_mesh_resolution
-    } else {
-        lod_settings.low_detail_mesh_resolution
-    }
-}
-
-#[allow(dead_code)]
-fn vertex_batch_bounds(
-    total_vertices: usize,
-    primitive_stride: usize,
-    batch_vertex_limit: usize,
-) -> Vec<(usize, usize)> {
-    let primitive_stride = primitive_stride.max(1);
-    let mut batch_vertex_limit = batch_vertex_limit.max(primitive_stride);
-    batch_vertex_limit -= batch_vertex_limit % primitive_stride;
-    if batch_vertex_limit == 0 {
-        batch_vertex_limit = primitive_stride;
-    }
-
-    let usable_vertices = total_vertices - (total_vertices % primitive_stride);
-    let mut ranges = Vec::new();
-    let mut start = 0;
-
-    while start < usable_vertices {
-        let remaining = usable_vertices - start;
-        let len = remaining.min(batch_vertex_limit);
-        ranges.push((start, len));
-        start += len;
-    }
-
-    ranges
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{molecule_geometry_hash, vertex_batch_bounds};
-    use crate::molecule::{Atom, Bond};
-    use crate::Molecule;
-    use lin_alg::f32::Vec3;
-
-    fn carbon(x: f32) -> Atom {
-        Atom {
-            position: Vec3::new(x, 0.0, 0.0),
-            element: "C".to_string(),
-            id: 0,
-            name: None,
-            res_name: None,
-            chain_id: None,
-            res_seq: None,
-            occupancy: None,
-            temp_factor: None,
-            charge: None,
-        }
-    }
-
-    #[test]
-    fn geometry_hash_changes_when_atom_moves() {
-        // Regression: animating an MM minimization updates positions in place via
-        // repeated set_molecule. The geometry cache must invalidate on position change.
-        let m1 = Molecule {
-            atoms: vec![carbon(0.0)],
-            bonds: vec![],
-        };
-        let m2 = Molecule {
-            atoms: vec![carbon(1.0)],
-            bonds: vec![],
-        };
-        assert_ne!(
-            molecule_geometry_hash(Some(&m1)),
-            molecule_geometry_hash(Some(&m2)),
-        );
-    }
-
-    #[test]
-    fn geometry_hash_stable_for_identical_molecules() {
-        let make = || Molecule {
-            atoms: vec![carbon(0.5)],
-            bonds: vec![Bond {
-                atom_a: 0,
-                atom_b: 0,
-                order: 1,
-            }],
-        };
-        assert_eq!(
-            molecule_geometry_hash(Some(&make())),
-            molecule_geometry_hash(Some(&make())),
-        );
-    }
-
-    #[test]
-    fn vertex_batch_bounds_keeps_full_primitives() {
-        assert_eq!(
-            vertex_batch_bounds(12, 3, 5),
-            vec![(0, 3), (3, 3), (6, 3), (9, 3)]
-        );
-    }
-
-    #[test]
-    fn vertex_batch_bounds_drops_incomplete_tail() {
-        assert_eq!(vertex_batch_bounds(10, 3, 5), vec![(0, 3), (3, 3), (6, 3)]);
-    }
 }

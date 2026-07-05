@@ -13,20 +13,21 @@ pub enum ViewerEvent {
     NothingClicked,
 }
 
-/// Color function type: takes Atom and is_selected flag, returns RGB color
-pub type ColorFn = fn(&Atom, bool) -> (f32, f32, f32);
+/// Color function type: takes Atom and is_selected flag, returns RGBA color.
+/// The fourth component is the alpha channel (1.0 = opaque, 0.0 = transparent).
+pub type ColorFn = fn(&Atom, bool) -> (f32, f32, f32, f32);
 
-/// Default color function based on element type
-pub fn default_color_fn(atom: &Atom, _is_selected: bool) -> (f32, f32, f32) {
+/// Default color function based on element type. Fully opaque (alpha = 1.0).
+pub fn default_color_fn(atom: &Atom, _is_selected: bool) -> (f32, f32, f32, f32) {
     match atom.element.as_str() {
-        "C" => (0.1, 0.1, 0.1),  // Black/Dark Grey
-        "H" => (0.9, 0.9, 0.9),  // White
-        "O" => (0.9, 0.1, 0.1),  // Red
-        "N" => (0.1, 0.1, 0.9),  // Blue
-        "S" => (0.9, 0.9, 0.1),  // Yellow
-        "P" => (1.0, 0.6, 0.0),  // Orange
-        "Cl" => (0.1, 0.9, 0.1), // Green
-        _ => (0.7, 0.7, 0.7),    // Grey
+        "C" => (0.1, 0.1, 0.1, 1.0),  // Black/Dark Grey
+        "H" => (0.9, 0.9, 0.9, 1.0),  // White
+        "O" => (0.9, 0.1, 0.1, 1.0),  // Red
+        "N" => (0.1, 0.1, 0.9, 1.0),  // Blue
+        "S" => (0.9, 0.9, 0.1, 1.0),  // Yellow
+        "P" => (1.0, 0.6, 0.0, 1.0),  // Orange
+        "Cl" => (0.1, 0.9, 0.1, 1.0), // Green
+        _ => (0.7, 0.7, 0.7, 1.0),    // Grey
     }
 }
 
@@ -35,6 +36,16 @@ pub struct MoleculeViewer {
     pub dirty: bool,
     pub additional_render: Vec<Box<dyn AdditionalRender>>,
     pub color_fn: ColorFn,
+    /// Opacity of the whole molecule (atoms + bonds) in `0.0..=1.0`, folded into
+    /// each geometry color's alpha at render time. `1.0` is fully opaque.
+    pub molecule_opacity: f32,
+    /// Optional per-atom sphere radius override (atom order). When `Some`, each
+    /// entry replaces the element-derived radius for that atom in the built-in
+    /// ball / impostor rendering; `None` keeps the element defaults.
+    pub atom_radii: Option<Vec<f32>>,
+    /// Optional per-atom RGBA color override (atom order). When `Some`, each
+    /// entry replaces `color_fn`'s result for that atom; `None` uses `color_fn`.
+    pub atom_colors: Option<Vec<[f32; 4]>>,
 }
 
 impl MoleculeViewer {
@@ -44,6 +55,9 @@ impl MoleculeViewer {
             dirty: false,
             additional_render: Vec::new(),
             color_fn: default_color_fn,
+            molecule_opacity: 1.0,
+            atom_radii: None,
+            atom_colors: None,
         }
     }
 
@@ -54,6 +68,9 @@ impl MoleculeViewer {
             dirty: false,
             additional_render: Vec::new(),
             color_fn,
+            molecule_opacity: 1.0,
+            atom_radii: None,
+            atom_colors: None,
         }
     }
 
@@ -63,9 +80,56 @@ impl MoleculeViewer {
         self.dirty = true;
     }
 
+    /// Set the whole-molecule opacity (clamped to `0.0..=1.0`). `1.0` is opaque.
+    pub fn set_molecule_opacity(&mut self, opacity: f32) {
+        self.molecule_opacity = opacity.clamp(0.0, 1.0);
+        self.dirty = true;
+    }
+
+    /// Set (or clear) the per-atom radius override used by the built-in molecule
+    /// rendering. Pass `None` to fall back to element-derived radii.
+    pub fn set_atom_radii(&mut self, radii: Option<Vec<f32>>) {
+        self.atom_radii = radii;
+        self.dirty = true;
+    }
+
+    /// Set (or clear) the per-atom RGBA color override used by the built-in
+    /// molecule rendering. Pass `None` to fall back to `color_fn`.
+    pub fn set_atom_colors(&mut self, colors: Option<Vec<[f32; 4]>>) {
+        self.atom_colors = colors;
+        self.dirty = true;
+    }
+
     pub fn set_molecule(&mut self, molecule: Molecule) {
         self.molecule = Some(molecule);
         self.dirty = true;
+    }
+
+    /// Update the loaded molecule's atom positions in place for trajectory
+    /// playback. Elements, bonds and metadata are untouched, so feeding
+    /// successive frames reuses all existing storage. `positions` must match
+    /// the atom count and be in the crate's nanometer units. Returns `Err` if
+    /// no molecule is loaded or the count mismatches.
+    pub fn update_positions(&mut self, positions: &[Vec3]) -> Result<(), String> {
+        let mol = self
+            .molecule
+            .as_mut()
+            .ok_or_else(|| "no molecule loaded".to_string())?;
+        mol.set_positions(positions)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Like [`update_positions`](Self::update_positions) but takes Ångström
+    /// coordinates, applying the crate's Å→nm conversion.
+    pub fn update_positions_angstrom(&mut self, coords: &[[f32; 3]]) -> Result<(), String> {
+        let mol = self
+            .molecule
+            .as_mut()
+            .ok_or_else(|| "no molecule loaded".to_string())?;
+        mol.set_positions_angstrom(coords)?;
+        self.dirty = true;
+        Ok(())
     }
 
     pub fn add_additional_render<R: AdditionalRender + 'static>(&mut self, render: R) {
@@ -255,8 +319,8 @@ impl MoleculeViewer {
                     cyl_idx,
                     mid,
                     orientation,
-                    1.0,             // Base scale, overridden by partial
-                    (0.5, 0.5, 0.5), // Grey bonds
+                    1.0,                  // Base scale, overridden by partial
+                    (0.5, 0.5, 0.5, 1.0), // Grey bonds
                     0.1,
                 );
                 entity.scale_partial = Some(scale_partial);
@@ -273,7 +337,7 @@ impl MoleculeViewer {
                 Vec3::new(axis_len / 2.0, 0.0, 0.0),
                 Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
                 1.0,
-                (1.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0, 1.0),
                 0.1,
             );
             x_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
@@ -285,7 +349,7 @@ impl MoleculeViewer {
                 Vec3::new(0.0, axis_len / 2.0, 0.0),
                 Quaternion::new_identity(),
                 1.0,
-                (0.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0, 1.0),
                 0.1,
             );
             y_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
@@ -297,7 +361,7 @@ impl MoleculeViewer {
                 Vec3::new(0.0, 0.0, axis_len / 2.0),
                 Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
                 1.0,
-                (0.0, 0.0, 1.0),
+                (0.0, 0.0, 1.0, 1.0),
                 0.1,
             );
             z_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));

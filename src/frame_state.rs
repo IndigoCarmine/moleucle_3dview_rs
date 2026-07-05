@@ -17,9 +17,23 @@ pub struct RenderFrameState<'a> {
     pub render_style: RenderStyle,
     pub mesh_resolution: usize,
     pub is_low_mode: bool,
+    /// Opacity applied to the whole main molecule (atoms + bonds) in
+    /// `0.0..=1.0`. Folded into each geometry color's alpha channel so the
+    /// molecule can be faded without changing its `color_fn`. `1.0` is opaque.
+    pub molecule_opacity: f32,
+    /// Optional per-atom sphere radius override, indexed by atom order. When
+    /// present, entry `i` replaces the element-derived radius for atom `i`;
+    /// indices past the end fall back to the element default. Lets callers draw
+    /// e.g. coarse-grained beads through the built-in molecule pipeline.
+    pub atom_radii: Option<&'a [f32]>,
+    /// Optional per-atom RGBA color override, indexed by atom order. When
+    /// present, entry `i` replaces `color_fn`'s result for atom `i` (indices
+    /// past the end fall back to `color_fn`). `molecule_opacity` still applies.
+    pub atom_colors: Option<&'a [[f32; 4]]>,
 }
 
 impl<'a> RenderFrameState<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         molecule: Option<&'a Molecule>,
         view_proj: [f32; 16],
@@ -33,6 +47,7 @@ impl<'a> RenderFrameState<'a> {
         render_style: RenderStyle,
         mesh_resolution: usize,
         is_low_mode: bool,
+        molecule_opacity: f32,
     ) -> Self {
         Self {
             molecule,
@@ -47,6 +62,20 @@ impl<'a> RenderFrameState<'a> {
             render_style,
             mesh_resolution,
             is_low_mode,
+            molecule_opacity,
+            atom_radii: None,
+            atom_colors: None,
         }
+    }
+
+    /// Attach optional per-atom radius / color overrides (see the field docs).
+    pub fn with_atom_attrs(
+        mut self,
+        atom_radii: Option<&'a [f32]>,
+        atom_colors: Option<&'a [[f32; 4]]>,
+    ) -> Self {
+        self.atom_radii = atom_radii;
+        self.atom_colors = atom_colors;
+        self
     }
 }

@@ -113,7 +113,9 @@ pub struct Entity {
     pub orientation: Quaternion,
     pub scale: f32,
     pub scale_partial: Option<Vec3>,
-    pub color: (f32, f32, f32),
+    /// RGBA color. The fourth component is the alpha channel used for blending
+    /// (1.0 = opaque, 0.0 = fully transparent).
+    pub color: (f32, f32, f32, f32),
     pub opacity: f32,
     pub shinyness: f32,
 }
@@ -124,7 +126,7 @@ impl Entity {
         position: Vec3,
         orientation: Quaternion,
         scale: f32,
-        color: (f32, f32, f32),
+        color: (f32, f32, f32, f32),
         shinyness: f32,
     ) -> Self {
         Self {
@@ -172,8 +174,8 @@ impl SceneCamera {
 pub struct SphereImpostorInstance {
     pub center: [f32; 3],
     pub radius: f32,
-    pub color: [f32; 3],
-    pub _pad: f32,
+    /// RGBA color; the alpha component drives alpha blending in the shader.
+    pub color: [f32; 4],
 }
 
 #[derive(Clone, Debug, Default)]

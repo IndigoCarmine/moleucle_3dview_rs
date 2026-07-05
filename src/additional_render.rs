@@ -29,7 +29,7 @@ pub trait AdditionalRender: Send {
         frame: &RenderFrameState<'_>,
         position: Vec3,
         radius: f32,
-        color: (f32, f32, f32),
+        color: (f32, f32, f32, f32),
     ) {
         if matches!(self.gpu_pipeline(), GpuPipeline::SphereImpostor)
             || matches!(frame.render_style, RenderStyle::Circles)
@@ -37,8 +37,7 @@ pub trait AdditionalRender: Send {
             scene.sphere_impostors.push(SphereImpostorInstance {
                 center: [position.x, position.y, position.z],
                 radius,
-                color: [color.0, color.1, color.2],
-                _pad: 0.0,
+                color: [color.0, color.1, color.2, color.3],
             });
             return;
         }
@@ -69,7 +68,7 @@ pub trait AdditionalRender: Send {
         frame: &RenderFrameState<'_>,
         position: Vec3,
         relative_radius: f32,
-        color: (f32, f32, f32),
+        color: (f32, f32, f32, f32),
     ) {
         let radius = vdw_radius("C") * relative_radius; // Carbon van der Waals radius for demo
         self.add_sphere(scene, frame, position, radius, color);
@@ -80,7 +79,7 @@ pub trait AdditionalRender: Send {
         start: Vec3,
         end: Vec3,
         radius: f32,
-        color: (f32, f32, f32),
+        color: (f32, f32, f32, f32),
     ) {
         let cyl_mesh = Mesh::new_cylinder(1.0, 1.0, 10);
         let mesh_idx = scene.meshes.len();
@@ -100,7 +99,8 @@ pub trait AdditionalRender: Send {
 #[derive(Clone)]
 pub struct SelectedAtomRenderState {
     pub selected_atoms: Vec<usize>,
-    pub color: [f32; 3],
+    /// RGBA highlight color; the alpha component controls transparency.
+    pub color: [f32; 4],
 }
 pub struct SelectedAtomRender {}
 
@@ -125,11 +125,16 @@ impl AdditionalRender for SelectedAtomRender {
             get_state_clone_by_type::<SelectedAtomRenderState>(states).unwrap_or_else(|| {
                 SelectedAtomRenderState {
                     selected_atoms: Vec::new(),
-                    color: [1.0, 0.0, 0.0], // Default red color
+                    color: [1.0, 0.0, 0.0, 1.0], // Default red color
                 }
             });
 
-        let color = (source.color[0], source.color[1], source.color[2]);
+        let color = (
+            source.color[0],
+            source.color[1],
+            source.color[2],
+            source.color[3],
+        );
         scene.entities.reserve(source.selected_atoms.len());
         for atom_idx in &source.selected_atoms {
             if let Some(atom) = molecule.atoms.get(*atom_idx) {
@@ -146,14 +151,14 @@ impl AdditionalRender for SelectedAtomRender {
 }
 
 impl SelectedAtomRenderState {
-    pub fn new(selected_atoms: Vec<usize>, color: [f32; 3]) -> Self {
+    pub fn new(selected_atoms: Vec<usize>, color: [f32; 4]) -> Self {
         Self {
             selected_atoms,
             color,
         }
     }
 
-    pub fn set_color(&mut self, color: [f32; 3]) {
+    pub fn set_color(&mut self, color: [f32; 4]) {
         self.color = color;
     }
 
@@ -175,7 +180,7 @@ impl SelectedAtomRenderState {
 pub struct DebugRenderState {
     pub ray: (Vec3, Vec3),
     pub ray_length: f32,
-    pub ray_color: (f32, f32, f32),
+    pub ray_color: (f32, f32, f32, f32),
 }
 
 impl DebugRenderState {
@@ -183,7 +188,7 @@ impl DebugRenderState {
         Self {
             ray,
             ray_length: 100.0,
-            ray_color: (0.0, 1.0, 0.0), // Default green color
+            ray_color: (0.0, 1.0, 0.0, 1.0), // Default green color
         }
     }
 
@@ -192,12 +197,12 @@ impl DebugRenderState {
         Self {
             ray,
             ray_length: length,
-            ray_color: (0.0, 1.0, 0.0),
+            ray_color: (0.0, 1.0, 0.0, 1.0),
         }
     }
 
     /// Create a debug renderer with custom color
-    pub fn with_color(ray: (Vec3, Vec3), color: (f32, f32, f32)) -> Self {
+    pub fn with_color(ray: (Vec3, Vec3), color: (f32, f32, f32, f32)) -> Self {
         Self {
             ray,
             ray_length: 100.0,
@@ -209,7 +214,7 @@ impl DebugRenderState {
         self.ray_length = length;
     }
 
-    pub fn set_ray_color(&mut self, color: (f32, f32, f32)) {
+    pub fn set_ray_color(&mut self, color: (f32, f32, f32, f32)) {
         self.ray_color = color;
     }
 }
