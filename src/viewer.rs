@@ -39,6 +39,13 @@ pub struct MoleculeViewer {
     /// Opacity of the whole molecule (atoms + bonds) in `0.0..=1.0`, folded into
     /// each geometry color's alpha at render time. `1.0` is fully opaque.
     pub molecule_opacity: f32,
+    /// Optional per-atom sphere radius override (atom order). When `Some`, each
+    /// entry replaces the element-derived radius for that atom in the built-in
+    /// ball / impostor rendering; `None` keeps the element defaults.
+    pub atom_radii: Option<Vec<f32>>,
+    /// Optional per-atom RGBA color override (atom order). When `Some`, each
+    /// entry replaces `color_fn`'s result for that atom; `None` uses `color_fn`.
+    pub atom_colors: Option<Vec<[f32; 4]>>,
 }
 
 impl MoleculeViewer {
@@ -49,6 +56,8 @@ impl MoleculeViewer {
             additional_render: Vec::new(),
             color_fn: default_color_fn,
             molecule_opacity: 1.0,
+            atom_radii: None,
+            atom_colors: None,
         }
     }
 
@@ -60,6 +69,8 @@ impl MoleculeViewer {
             additional_render: Vec::new(),
             color_fn,
             molecule_opacity: 1.0,
+            atom_radii: None,
+            atom_colors: None,
         }
     }
 
@@ -72,6 +83,20 @@ impl MoleculeViewer {
     /// Set the whole-molecule opacity (clamped to `0.0..=1.0`). `1.0` is opaque.
     pub fn set_molecule_opacity(&mut self, opacity: f32) {
         self.molecule_opacity = opacity.clamp(0.0, 1.0);
+        self.dirty = true;
+    }
+
+    /// Set (or clear) the per-atom radius override used by the built-in molecule
+    /// rendering. Pass `None` to fall back to element-derived radii.
+    pub fn set_atom_radii(&mut self, radii: Option<Vec<f32>>) {
+        self.atom_radii = radii;
+        self.dirty = true;
+    }
+
+    /// Set (or clear) the per-atom RGBA color override used by the built-in
+    /// molecule rendering. Pass `None` to fall back to `color_fn`.
+    pub fn set_atom_colors(&mut self, colors: Option<Vec<[f32; 4]>>) {
+        self.atom_colors = colors;
         self.dirty = true;
     }
 

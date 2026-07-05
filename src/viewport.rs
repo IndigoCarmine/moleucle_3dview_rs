@@ -142,6 +142,20 @@ impl InteractiveMoleculeViewport {
         self.viewer.set_molecule_opacity(opacity);
     }
 
+    /// Override the per-atom sphere radius of the main molecule (atom order),
+    /// or pass `None` to use element-derived radii. Lets callers draw
+    /// coarse-grained beads through the built-in pipeline (so they participate
+    /// in shading, picking and opacity) instead of a separate overlay.
+    pub fn set_atom_radii(&mut self, radii: Option<Vec<f32>>) {
+        self.viewer.set_atom_radii(radii);
+    }
+
+    /// Override the per-atom RGBA color of the main molecule (atom order), or
+    /// pass `None` to use the color function.
+    pub fn set_atom_colors(&mut self, colors: Option<Vec<[f32; 4]>>) {
+        self.viewer.set_atom_colors(colors);
+    }
+
     pub fn free_egui_texture(&mut self, render_state: &egui_wgpu::RenderState) {
         self.offscreen.free_egui_texture(render_state);
     }
@@ -187,6 +201,10 @@ impl InteractiveMoleculeViewport {
             self.offscreen.mesh_resolution(),
             self.offscreen.is_low_mode(),
             self.viewer.molecule_opacity,
+        )
+        .with_atom_attrs(
+            self.viewer.atom_radii.as_deref(),
+            self.viewer.atom_colors.as_deref(),
         );
 
         self.offscreen

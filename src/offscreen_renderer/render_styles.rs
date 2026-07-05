@@ -14,6 +14,10 @@ pub(super) struct StyleBuildContext<'a> {
     pub(super) cylinder_mesh: &'a RenderMesh,
     /// Whole-molecule opacity in `0.0..=1.0`, folded into atom/bond alpha.
     pub(super) molecule_opacity: f32,
+    /// Optional per-atom radius / RGBA color overrides (atom order); `None`
+    /// falls back to element-derived radii and `color_fn`.
+    pub(super) atom_radii: Option<&'a [f32]>,
+    pub(super) atom_colors: Option<&'a [[f32; 4]]>,
 }
 
 pub(super) trait MolecularRenderStyle {
