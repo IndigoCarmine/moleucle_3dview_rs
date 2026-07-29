@@ -351,14 +351,15 @@ impl OffscreenRenderer {
         self.additional_renders.push(render);
     }
 
-    fn additional_pipeline_for<'a>(
-        gpu: &'a GpuResources,
+    fn additional_pipeline_for(
+        gpu: &GpuResources,
         pipeline: GpuPipeline,
-    ) -> &'a wgpu::RenderPipeline {
+        depth_write: bool,
+    ) -> &wgpu::RenderPipeline {
         match pipeline {
-            GpuPipeline::Triangles => &gpu.additional_pipeline,
-            GpuPipeline::Wireframe => &gpu.wire_pipeline,
-            GpuPipeline::SphereImpostor => &gpu.circles_pipeline,
+            GpuPipeline::Triangles => gpu.additional_pipeline.get(depth_write),
+            GpuPipeline::Wireframe => gpu.wire_pipeline.get(depth_write),
+            GpuPipeline::SphereImpostor => gpu.circles_pipeline.get(depth_write),
         }
     }
 
@@ -567,15 +568,27 @@ impl OffscreenRenderer {
                 multiview_mask: None,
             });
 
+            // A faded molecule must not stamp the depth buffer, or the atoms
+            // behind it (and any additional render drawn later in this pass)
+            // stay depth-culled no matter how low the alpha goes. Per-atom
+            // colors carry their own alpha, so check those too.
+            let translucent = frame.molecule_opacity < 1.0
+                || frame
+                    .atom_colors
+                    .is_some_and(|colors| colors.iter().any(|color| color[3] < 1.0));
+            let depth_write = !translucent;
+
             let pipeline = if use_impostors {
-                &gpu.circles_pipeline
+                gpu.circles_pipeline.get(depth_write)
             } else {
                 match self.preference.render_style() {
-                    RenderStyle::BallStick if self.preference.is_low_mode() => &gpu.wire_pipeline,
-                    RenderStyle::BallStick => &gpu.pipeline,
-                    RenderStyle::BallOnly => &gpu.pipeline,
-                    RenderStyle::Circles => &gpu.circles_pipeline,
-                    RenderStyle::Wireframe => &gpu.wire_pipeline,
+                    RenderStyle::BallStick if self.preference.is_low_mode() => {
+                        gpu.wire_pipeline.get(depth_write)
+                    }
+                    RenderStyle::BallStick => gpu.pipeline.get(depth_write),
+                    RenderStyle::BallOnly => gpu.pipeline.get(depth_write),
+                    RenderStyle::Circles => gpu.circles_pipeline.get(depth_write),
+                    RenderStyle::Wireframe => gpu.wire_pipeline.get(depth_write),
                 }
             };
 
@@ -593,7 +606,7 @@ impl OffscreenRenderer {
                 if bonds_as_instances {
                     if let Some(bond_buffer) = &gpu.bond_instance_buffer {
                         if gpu.bond_instance_count > 0 {
-                            pass.set_pipeline(&gpu.bond_pipeline);
+                            pass.set_pipeline(gpu.bond_pipeline.get(depth_write));
                             pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
                             pass.set_vertex_buffer(1, bond_buffer.slice(..));
                             pass.draw(0..gpu.bond_mesh_vertex_count, 0..gpu.bond_instance_count);
@@ -608,6 +621,15 @@ impl OffscreenRenderer {
             for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
                 additional_batches.into_iter()
             {
+                // Same rule as the molecule: a batch carrying any translucent
+                // color skips depth writes so it doesn't hide what's behind it
+                // (e.g. a faded inactive layer covering the active one).
+                let translucent = additional_sphere_impostors
+                    .iter()
+                    .any(|instance| instance.color[3] < 1.0)
+                    || additional_vertices.iter().any(|v| v.color[3] < 1.0);
+                let depth_write = !translucent;
+
                 if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
                     let additional_vertex_buffer =
                         render_state
@@ -618,7 +640,7 @@ impl OffscreenRenderer {
                                 usage: wgpu::BufferUsages::VERTEX,
                             });
 
-                    let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind);
+                    let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind, depth_write);
                     pass.set_pipeline(pipeline);
                     pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
                     pass.draw(0..additional_vertices.len() as u32, 0..1);
@@ -634,7 +656,11 @@ impl OffscreenRenderer {
                                 usage: wgpu::BufferUsages::VERTEX,
                             });
 
-                    let pipeline = Self::additional_pipeline_for(gpu, GpuPipeline::SphereImpostor);
+                    let pipeline = Self::additional_pipeline_for(
+                        gpu,
+                        GpuPipeline::SphereImpostor,
+                        depth_write,
+                    );
                     pass.set_pipeline(pipeline);
                     pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
                     pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
@@ -764,7 +790,10 @@ impl OffscreenRenderer {
         };
 
         let radius = default_ball_stick_bond_radius();
-        let color = [0.55, 0.55, 0.55, 1.0];
+        // Same bond color the mesh BallStick path bakes in, opacity included, so
+        // the fallback fades with the molecule instead of staying opaque while
+        // its own pipeline has depth writes disabled.
+        let color = [0.55, 0.55, 0.55, frame.molecule_opacity];
         out.reserve(mol.bonds.len().min(MAX_IMPOSTOR_INSTANCES));
 
         for bond in &mol.bonds {

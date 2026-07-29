@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "moleucle_3dview_rs"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bio_files",
  "bytemuck",

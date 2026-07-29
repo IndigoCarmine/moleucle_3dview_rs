@@ -5,12 +5,62 @@ use super::render_styles::circles::CircleInstance;
 use super::{BondInstance, BondMeshVertex, CircleQuadVertex, RenderMesh, Uniforms, Vertex};
 use super::DEFAULT_BOND_CYLINDER_SIDES;
 
+/// One render pipeline in two variants that differ *only* in
+/// `depth_write_enabled`. Depth *testing* (`LessEqual`) stays on in both.
+///
+/// Translucent draws pick `no_depth_write` so a faded fragment does not stamp
+/// the depth buffer and cull whatever is behind it — otherwise lowering an
+/// object's alpha changes its color but still hides everything further away.
+///
+/// Caveat: with depth writes off, translucent fragments are blended in *draw
+/// order* rather than back-to-front, so overlapping translucent geometry is
+/// order-dependent. This renderer does no depth sorting and no order-independent
+/// transparency; that approximation is accepted.
+pub(super) struct PipelineSet {
+    depth_write: wgpu::RenderPipeline,
+    no_depth_write: wgpu::RenderPipeline,
+}
+
+impl PipelineSet {
+    pub(super) fn get(&self, depth_write: bool) -> &wgpu::RenderPipeline {
+        if depth_write {
+            &self.depth_write
+        } else {
+            &self.no_depth_write
+        }
+    }
+}
+
+/// Build both variants of a pipeline from a closure that takes the label and
+/// the `depth_write` flag to bake in.
+fn pipeline_set(
+    label: &str,
+    mut build: impl FnMut(&str, bool) -> wgpu::RenderPipeline,
+) -> PipelineSet {
+    PipelineSet {
+        depth_write: build(label, true),
+        no_depth_write: build(&format!("{label}-no-depth-write"), false),
+    }
+}
+
+/// Depth state shared by every pipeline: always depth-tested with `LessEqual`,
+/// writing depth only when `depth_write` is set.
+fn depth_stencil_state(depth_write: bool) -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: wgpu::TextureFormat::Depth24Plus,
+        depth_write_enabled: Some(depth_write),
+        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
 pub(super) struct GpuResources {
-    pub(super) pipeline: wgpu::RenderPipeline,
-    pub(super) additional_pipeline: wgpu::RenderPipeline,
-    pub(super) wire_pipeline: wgpu::RenderPipeline,
-    pub(super) circles_pipeline: wgpu::RenderPipeline,
-    pub(super) bond_pipeline: wgpu::RenderPipeline,
+    pub(super) pipeline: PipelineSet,
+    pub(super) additional_pipeline: PipelineSet,
+    pub(super) wire_pipeline: PipelineSet,
+    pub(super) circles_pipeline: PipelineSet,
+    pub(super) bond_pipeline: PipelineSet,
     pub(super) uniform_buffer: wgpu::Buffer,
     pub(super) uniform_bind_group: wgpu::BindGroup,
     pub(super) vertex_buffer: Option<wgpu::Buffer>,
@@ -115,73 +165,30 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         immediate_size: 0,
     });
 
-    let pipeline = create_triangle_pipeline(device, &layout, &shader, "offscreen-pipeline");
+    let pipeline = pipeline_set("offscreen-pipeline", |label, depth_write| {
+        create_triangle_pipeline(device, &layout, &shader, label, depth_write)
+    });
     let additional_pipeline =
-        create_triangle_pipeline(device, &layout, &shader, "offscreen-additional-pipeline");
+        pipeline_set("offscreen-additional-pipeline", |label, depth_write| {
+            create_triangle_pipeline(device, &layout, &shader, label, depth_write)
+        });
 
     let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-wire-shader"),
         source: wgpu::ShaderSource::Wgsl(WIRE_SHADER.into()),
     });
 
-    let wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-wire-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &wire_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: std::mem::size_of::<[f32; 3]>() as u64,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
-                        shader_location: 2,
-                    },
-                ],
-            }],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &wire_shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::LineList,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
+    let wire_pipeline = pipeline_set("offscreen-wire-pipeline", |label, depth_write| {
+        create_wire_pipeline(device, &layout, &wire_shader, label, depth_write)
     });
 
-    let circles_pipeline = create_circles_pipeline(device, &layout);
+    let circles_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("offscreen-circles-shader"),
+        source: wgpu::ShaderSource::Wgsl(CIRCLES_SHADER.into()),
+    });
+    let circles_pipeline = pipeline_set("offscreen-circles-pipeline", |label, depth_write| {
+        create_circles_pipeline(device, &layout, &circles_shader, label, depth_write)
+    });
     let circles_quad_vertices = [
         CircleQuadVertex { corner: [-1.0, -1.0] },
         CircleQuadVertex { corner: [1.0, -1.0] },
@@ -196,7 +203,13 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    let bond_pipeline = create_bond_pipeline(device, &layout);
+    let bond_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("offscreen-bond-shader"),
+        source: wgpu::ShaderSource::Wgsl(BOND_SHADER.into()),
+    });
+    let bond_pipeline = pipeline_set("offscreen-bond-pipeline", |label, depth_write| {
+        create_bond_pipeline(device, &layout, &bond_shader, label, depth_write)
+    });
     // Expand the indexed unit cylinder into a non-indexed triangle list, the
     // shared geometry every bond instance is drawn with.
     let cylinder = RenderMesh::new_cylinder_open_ended(1.0, 1.0, DEFAULT_BOND_CYLINDER_SIDES);
@@ -246,6 +259,7 @@ fn create_triangle_pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     label: &str,
+    depth_write: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -292,13 +306,66 @@ fn create_triangle_pipeline(
             cull_mode: Some(wgpu::Face::Back),
             ..Default::default()
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
+        depth_stencil: Some(depth_stencil_state(depth_write)),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_wire_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    depth_write: bool,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: std::mem::size_of::<[f32; 3]>() as u64,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
+                        shader_location: 2,
+                    },
+                ],
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(depth_stencil_state(depth_write)),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -308,17 +375,15 @@ fn create_triangle_pipeline(
 fn create_circles_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    depth_write: bool,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("offscreen-circles-shader"),
-        source: wgpu::ShaderSource::Wgsl(CIRCLES_SHADER.into()),
-    });
-
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-circles-pipeline"),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: shader,
             entry_point: Some("vs_main"),
             buffers: &[
                 wgpu::VertexBufferLayout {
@@ -355,7 +420,7 @@ fn create_circles_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: shader,
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
@@ -370,13 +435,7 @@ fn create_circles_pipeline(
             cull_mode: None,
             ..Default::default()
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
+        depth_stencil: Some(depth_stencil_state(depth_write)),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
@@ -386,17 +445,15 @@ fn create_circles_pipeline(
 fn create_bond_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    depth_write: bool,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("offscreen-bond-shader"),
-        source: wgpu::ShaderSource::Wgsl(BOND_SHADER.into()),
-    });
-
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-bond-pipeline"),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: shader,
             entry_point: Some("vs_main"),
             buffers: &[
                 // Per-vertex unit cylinder geometry.
@@ -452,7 +509,7 @@ fn create_bond_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: shader,
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
@@ -468,13 +525,7 @@ fn create_bond_pipeline(
             cull_mode: None,
             ..Default::default()
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth24Plus,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
+        depth_stencil: Some(depth_stencil_state(depth_write)),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
