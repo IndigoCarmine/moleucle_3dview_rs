@@ -331,9 +331,14 @@ impl OffscreenRenderer {
     /// Copy the color target back to the CPU as tightly packed, top-down RGBA8
     /// rows (`width * height * 4` bytes).
     ///
-    /// Alpha is straight, not premultiplied: the pipelines blend with
-    /// [`wgpu::BlendState::ALPHA_BLENDING`] and the target is `Rgba8Unorm`, so
-    /// the bytes can go straight into a PNG.
+    /// The bytes are the raw target contents, which are **premultiplied** wherever
+    /// anything translucent was drawn: the pipelines blend with
+    /// [`wgpu::BlendState::ALPHA_BLENDING`], so a fragment of opacity `a` over a
+    /// transparent clear lands as `rgb = a * color`, `alpha = a`. Callers writing
+    /// a PNG have to divide the color through by alpha first — that is what
+    /// [`crate::InteractiveMoleculeViewport::render_image`] does. With an opaque
+    /// background every pixel comes back at `alpha = 1` and the distinction
+    /// disappears.
     ///
     /// Blocks until the GPU finishes the copy, so call it for an explicit export
     /// rather than per frame.

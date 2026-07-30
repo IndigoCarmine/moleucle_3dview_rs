@@ -56,7 +56,8 @@ impl Default for ImageExportRequest {
     }
 }
 
-/// A rendered image: tightly packed, top-down, straight-alpha RGBA8 rows.
+/// A rendered image: tightly packed, top-down RGBA8 rows with **straight**
+/// (non-premultiplied) alpha, ready to hand to a PNG encoder.
 pub struct ExportedImage {
     pub width: u32,
     pub height: u32,
@@ -90,13 +91,20 @@ fn region_crop_matrix(region: [f32; 4]) -> Mat4 {
     ])
 }
 
-/// Box-filter `src` down by `factor` in both axes.
+/// Box-filter `src` down by `factor` in both axes, staying in premultiplied
+/// alpha.
 ///
-/// Averaging happens in *premultiplied* alpha and is undone afterwards. Doing it
-/// on straight alpha would blend the background's RGB into every partially
-/// covered pixel, which shows up as a dark halo around the molecule on a
-/// transparent export.
-fn downsample_rgba(src: &[u8], width: u32, height: u32, factor: u32) -> (u32, u32, Vec<u8>) {
+/// The color target is already premultiplied (see [`unpremultiply`]), and a plain
+/// linear average of premultiplied values is the correct filter — that is exactly
+/// why compositing pipelines keep premultiplied intermediates. Averaging straight
+/// alpha instead would pull each partially covered pixel's RGB toward the
+/// background, which reads as a dark halo around the molecule.
+fn box_filter_premultiplied(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    factor: u32,
+) -> (u32, u32, Vec<u8>) {
     if factor <= 1 {
         return (width, height, src.to_vec());
     }
@@ -106,35 +114,49 @@ fn downsample_rgba(src: &[u8], width: u32, height: u32, factor: u32) -> (u32, u3
 
     for oy in 0..out_h {
         for ox in 0..out_w {
-            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            let mut acc = [0.0f32; 4];
             for dy in 0..factor {
                 for dx in 0..factor {
                     let sx = ox * factor + dx;
                     let sy = oy * factor + dy;
                     let i = ((sy * width + sx) * 4) as usize;
-                    let alpha = src[i + 3] as f32 / 255.0;
-                    r += (src[i] as f32 / 255.0) * alpha;
-                    g += (src[i + 1] as f32 / 255.0) * alpha;
-                    b += (src[i + 2] as f32 / 255.0) * alpha;
-                    a += alpha;
+                    for c in 0..4 {
+                        acc[c] += src[i + c] as f32;
+                    }
                 }
             }
-            let (r, g, b, a) = (r / samples, g / samples, b / samples, a / samples);
-            let unpremul = |c: f32| {
-                if a > 0.0 {
-                    (c / a).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                }
-            };
-            out.push((unpremul(r) * 255.0).round() as u8);
-            out.push((unpremul(g) * 255.0).round() as u8);
-            out.push((unpremul(b) * 255.0).round() as u8);
-            out.push((a.clamp(0.0, 1.0) * 255.0).round() as u8);
+            for c in 0..4 {
+                out.push((acc[c] / samples).round().clamp(0.0, 255.0) as u8);
+            }
         }
     }
 
     (out_w, out_h, out)
+}
+
+/// Convert premultiplied RGBA in place to the straight alpha PNG and image
+/// editors expect.
+///
+/// The pipelines blend with [`wgpu::BlendState::ALPHA_BLENDING`], whose color
+/// factors are `SrcAlpha`/`OneMinusSrcAlpha` while its alpha factors are
+/// `One`/`OneMinusSrcAlpha`. Drawing a fragment of opacity `a` onto a target
+/// cleared to `(0, 0, 0, 0)` therefore leaves `rgb = a * color` with `alpha = a`
+/// — premultiplied. Writing that out as-is would darken anything translucent, so
+/// a molecule faded to 50% would export at half brightness.
+///
+/// With an opaque background every pixel ends up at `alpha = 1` and this is a
+/// no-op, so it is always safe to apply.
+fn unpremultiply(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        for c in 0..3 {
+            let straight = (px[c] as f32) * 255.0 / (a as f32);
+            px[c] = straight.round().clamp(0.0, 255.0) as u8;
+        }
+    }
 }
 
 fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortEvent) {
@@ -383,7 +405,10 @@ impl InteractiveMoleculeViewport {
         }
 
         let rgba = render_result?;
-        let (width, height, rgba) = downsample_rgba(&rgba, render_w, render_h, factor);
+        // Filter while still premultiplied, then convert once at the end.
+        let (width, height, mut rgba) =
+            box_filter_premultiplied(&rgba, render_w, render_h, factor);
+        unpremultiply(&mut rgba);
         Ok(ExportedImage {
             width,
             height,
@@ -592,33 +617,52 @@ mod tests {
         assert!((ny + 1.0).abs() < 1e-5, "screen middle becomes the bottom: {ny}");
     }
 
+    /// The full export tail: filter, then convert to straight alpha.
+    fn export_pixels(src: &[u8], width: u32, height: u32, factor: u32) -> (u32, u32, Vec<u8>) {
+        let (w, h, mut out) = box_filter_premultiplied(src, width, height, factor);
+        unpremultiply(&mut out);
+        (w, h, out)
+    }
+
     #[test]
-    fn downsampling_is_a_no_op_at_factor_one() {
-        let src = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        let (w, h, out) = downsample_rgba(&src, 2, 1, 1);
+    fn filtering_is_a_no_op_at_factor_one() {
+        let src = vec![1, 2, 3, 255, 5, 6, 7, 255];
+        let (w, h, out) = export_pixels(&src, 2, 1, 1);
         assert_eq!((w, h), (2, 1));
         assert_eq!(out, src);
     }
 
     #[test]
-    fn downsampling_averages_a_uniform_block() {
+    fn filtering_averages_a_uniform_block() {
         // 2x2 of the same opaque colour collapses to that colour.
         let src: Vec<u8> = [[10u8, 20, 30, 255]; 4].concat();
-        let (w, h, out) = downsample_rgba(&src, 2, 2, 2);
+        let (w, h, out) = export_pixels(&src, 2, 2, 2);
         assert_eq!((w, h), (1, 1));
         assert_eq!(out, vec![10, 20, 30, 255]);
     }
 
     #[test]
-    fn downsampling_a_transparent_edge_does_not_darken_the_colour() {
-        // Two opaque red pixels next to two fully transparent ones. Averaging on
-        // straight alpha would give a half-brightness red (127) — the dark halo
-        // this premultiplied path exists to avoid. The colour must stay red and
-        // only the alpha may drop.
+    fn a_translucent_pixel_exports_at_full_brightness() {
+        // What the GPU leaves for a 50%-opacity red over a transparent clear:
+        // premultiplied, so rgb is already halved. Writing that straight out
+        // would export the molecule at half brightness — the whole reason
+        // `unpremultiply` exists.
+        let src = vec![128u8, 0, 0, 128];
+        let (_, _, out) = export_pixels(&src, 1, 1, 1);
+        assert_eq!(out[0], 255, "red restored to full, not {}", out[0]);
+        assert_eq!(out[3], 128, "opacity preserved");
+    }
+
+    #[test]
+    fn a_transparent_edge_does_not_darken_the_colour() {
+        // Two opaque red pixels next to two fully transparent ones. Averaging
+        // straight alpha would give a half-brightness red — the dark halo the
+        // premultiplied filter avoids. The colour must stay saturated and only
+        // the alpha may drop.
         let opaque = [255u8, 0, 0, 255];
         let clear = [0u8, 0, 0, 0];
         let src: Vec<u8> = [opaque, opaque, clear, clear].concat();
-        let (_, _, out) = downsample_rgba(&src, 2, 2, 2);
+        let (_, _, out) = export_pixels(&src, 2, 2, 2);
         assert_eq!(out[0], 255, "red stays fully saturated, not {}", out[0]);
         assert_eq!(out[1], 0);
         assert_eq!(out[2], 0);
@@ -626,10 +670,20 @@ mod tests {
     }
 
     #[test]
-    fn downsampling_a_fully_transparent_block_stays_transparent() {
+    fn a_fully_transparent_block_stays_transparent() {
         let src: Vec<u8> = [[0u8, 0, 0, 0]; 4].concat();
-        let (_, _, out) = downsample_rgba(&src, 2, 2, 2);
+        let (_, _, out) = export_pixels(&src, 2, 2, 2);
         assert_eq!(out, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn an_opaque_background_is_untouched_by_the_alpha_conversion() {
+        // Every pixel comes back at alpha 1 with an opaque clear, so the
+        // conversion must not alter a single channel.
+        let mut px = vec![9u8, 200, 77, 255, 0, 1, 2, 255];
+        let before = px.clone();
+        unpremultiply(&mut px);
+        assert_eq!(px, before);
     }
 
     #[test]
