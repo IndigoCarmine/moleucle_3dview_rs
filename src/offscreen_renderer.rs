@@ -184,6 +184,9 @@ pub struct OffscreenRenderer {
     cylinder_mesh: RenderMesh,
     geometry_cache_key: Option<GeometryCacheKey>,
     lod: lod::LodManager,
+    /// While set, [`OffscreenRenderer::apply_pending_lod_resolution`] is a no-op
+    /// so a caller-forced mesh resolution survives the frame.
+    lod_locked: bool,
     additional_renders: Vec<Box<dyn AdditionalRender>>,
     /// Reusable CPU scratch buffers for impostor/bond instances, kept across
     /// frames so trajectory playback refills them without reallocating.
@@ -221,6 +224,7 @@ impl OffscreenRenderer {
             width: 0,
             height: 0,
             lod: lod::LodManager::new(preference.lod_settings()),
+            lod_locked: false,
             preference,
             color_texture: None,
             depth_texture: None,
@@ -801,7 +805,20 @@ impl OffscreenRenderer {
         self.lod.submit_distance(distance);
     }
 
+    /// Stop the LOD manager from changing the mesh resolution.
+    ///
+    /// Image export forces a high resolution for one frame, and
+    /// [`Self::apply_pending_lod_resolution`] runs at the top of every render —
+    /// so without this, a queued LOD decision would silently undo it and the
+    /// export would come out faceted.
+    pub fn set_lod_locked(&mut self, locked: bool) {
+        self.lod_locked = locked;
+    }
+
     fn apply_pending_lod_resolution(&mut self) {
+        if self.lod_locked {
+            return;
+        }
         let Some(target_resolution) = self.lod.poll_resolution() else {
             return;
         };

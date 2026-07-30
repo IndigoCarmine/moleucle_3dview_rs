@@ -42,6 +42,14 @@ pub struct ImageExportRequest {
     /// available. `1` disables it; the factor is reduced automatically when the
     /// scaled size would exceed the device's maximum texture dimension.
     pub supersample: u32,
+    /// Sphere/cylinder mesh resolution to force for this render, or `None` to
+    /// reuse whatever the interactive view is on.
+    ///
+    /// Worth setting for an export: the interactive view runs a LOD that drops
+    /// the resolution while the camera moves, and geometry that looks fine in a
+    /// few hundred pixels is visibly faceted once blown up to a couple of
+    /// thousand. The previous value is restored afterwards.
+    pub mesh_resolution: Option<usize>,
 }
 
 impl Default for ImageExportRequest {
@@ -52,6 +60,7 @@ impl Default for ImageExportRequest {
             region: None,
             clear_color: crate::frame_state::DEFAULT_CLEAR_COLOR,
             supersample: 2,
+            mesh_resolution: Some(32),
         }
     }
 }
@@ -351,6 +360,13 @@ impl InteractiveMoleculeViewport {
         let (render_w, render_h) = (request.width * factor, request.height * factor);
 
         let previous_size = self.offscreen.size();
+        let previous_mesh = self.offscreen.mesh_resolution();
+        if let Some(resolution) = request.mesh_resolution {
+            // Lock the LOD first: it runs at the top of the render and would
+            // otherwise put its own resolution back before anything is drawn.
+            self.offscreen.set_lod_locked(true);
+            self.offscreen.set_mesh_resolution(resolution);
+        }
 
         let view_proj = {
             let base = self.controller.camera.view_projection();
@@ -395,9 +411,12 @@ impl InteractiveMoleculeViewport {
             .render_frame_with_state(render_state, &frame)
             .and_then(|()| self.offscreen.read_rgba(render_state));
 
-        // Put the target back to the on-screen size whatever happened, so a
-        // failed export cannot leave the interactive view rendering at export
-        // resolution.
+        // Restore everything whatever happened, so a failed export cannot leave
+        // the interactive view rendering at export resolution or detail.
+        if request.mesh_resolution.is_some() {
+            self.offscreen.set_mesh_resolution(previous_mesh);
+            self.offscreen.set_lod_locked(false);
+        }
         if previous_size.0 > 0 && previous_size.1 > 0 {
             let _ = self
                 .offscreen
