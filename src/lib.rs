@@ -42,7 +42,7 @@ pub use additional_render::{AdditionalRender, DebugRender, GpuPipeline, Selected
 pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
 pub use camera::{Camera, OrbitalCamera, ProjectionType};
 pub use controller::CameraController;
-pub use frame_state::RenderFrameState;
+pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
 pub use molecule::{Atom, AtomMeta, AtomRecord, Element, Molecule};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};
 pub use render_state::{
@@ -51,4 +51,6 @@ pub use render_state::{
 };
 pub use scene_types::{Entity, Mesh, Scene};
 pub use viewer::{default_color_fn, ColorFn, MoleculeViewer};
-pub use viewport::{InteractiveMoleculeViewport, ViewPortEvent};
+pub use viewport::{
+    ExportedImage, ImageExportRequest, InteractiveMoleculeViewport, ViewPortEvent,
+};

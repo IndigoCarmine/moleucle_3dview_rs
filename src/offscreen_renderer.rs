@@ -322,6 +322,94 @@ impl OffscreenRenderer {
         self.texture_id
     }
 
+    /// Current color-target size in pixels, or `(0, 0)` before the first
+    /// [`Self::ensure_resources`].
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Copy the color target back to the CPU as tightly packed, top-down RGBA8
+    /// rows (`width * height * 4` bytes).
+    ///
+    /// Alpha is straight, not premultiplied: the pipelines blend with
+    /// [`wgpu::BlendState::ALPHA_BLENDING`] and the target is `Rgba8Unorm`, so
+    /// the bytes can go straight into a PNG.
+    ///
+    /// Blocks until the GPU finishes the copy, so call it for an explicit export
+    /// rather than per frame.
+    pub fn read_rgba(&self, render_state: &egui_wgpu::RenderState) -> Result<Vec<u8>, String> {
+        let texture = self
+            .color_texture
+            .as_ref()
+            .ok_or_else(|| "No color target to read; render a frame first".to_string())?;
+        let (width, height) = (self.width, self.height);
+        if width == 0 || height == 0 {
+            return Err("Color target has zero size".to_string());
+        }
+
+        // `copy_texture_to_buffer` requires each row to start on a 256-byte
+        // boundary, so the staging buffer is padded and the rows are compacted
+        // again after mapping.
+        let unpadded = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+
+        let device = &render_state.device;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen-readback"),
+            size: (padded as u64) * (height as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("offscreen-readback-encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = render_state.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|e| format!("Readback poll failed: {e}"))?;
+
+        let mut out = Vec::with_capacity((unpadded as usize) * (height as usize));
+        {
+            let mapped = slice.get_mapped_range();
+            for row in 0..height as usize {
+                let start = row * padded as usize;
+                out.extend_from_slice(&mapped[start..start + unpadded as usize]);
+            }
+        }
+        staging.unmap();
+
+        Ok(out)
+    }
+
     pub fn ensure_resources(
         &mut self,
         render_state: &egui_wgpu::RenderState,
@@ -547,10 +635,10 @@ impl OffscreenRenderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.10,
-                            b: 0.14,
-                            a: 1.0,
+                            r: frame.clear_color[0] as f64,
+                            g: frame.clear_color[1] as f64,
+                            b: frame.clear_color[2] as f64,
+                            a: frame.clear_color[3] as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -737,7 +825,11 @@ impl OffscreenRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC so `read_rgba` can pull the frame back to the CPU for
+            // image export. Without it the copy fails wgpu validation.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());

@@ -30,7 +30,17 @@ pub struct RenderFrameState<'a> {
     /// present, entry `i` replaces `color_fn`'s result for atom `i` (indices
     /// past the end fall back to `color_fn`). `molecule_opacity` still applies.
     pub atom_colors: Option<&'a [[f32; 4]]>,
+    /// Background the color target is cleared to, as straight (non-premultiplied)
+    /// RGBA in `0.0..=1.0`. An alpha of `0.0` leaves the background fully
+    /// transparent, which is what image export wants; the interactive view keeps
+    /// [`DEFAULT_CLEAR_COLOR`].
+    pub clear_color: [f32; 4],
 }
+
+/// The viewer's own background — the dark blue the interactive view has always
+/// used. `RenderFrameState::new` defaults to it so existing callers are
+/// unaffected by `clear_color` being added.
+pub const DEFAULT_CLEAR_COLOR: [f32; 4] = [0.08, 0.10, 0.14, 1.0];
 
 impl<'a> RenderFrameState<'a> {
     #[allow(clippy::too_many_arguments)]
@@ -65,6 +75,7 @@ impl<'a> RenderFrameState<'a> {
             molecule_opacity,
             atom_radii: None,
             atom_colors: None,
+            clear_color: DEFAULT_CLEAR_COLOR,
         }
     }
 
@@ -76,6 +87,12 @@ impl<'a> RenderFrameState<'a> {
     ) -> Self {
         self.atom_radii = atom_radii;
         self.atom_colors = atom_colors;
+        self
+    }
+
+    /// Override the background (see [`RenderFrameState::clear_color`]).
+    pub fn with_clear_color(mut self, clear_color: [f32; 4]) -> Self {
+        self.clear_color = clear_color;
         self
     }
 }
