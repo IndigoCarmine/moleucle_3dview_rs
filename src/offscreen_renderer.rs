@@ -184,6 +184,9 @@ pub struct OffscreenRenderer {
     cylinder_mesh: RenderMesh,
     geometry_cache_key: Option<GeometryCacheKey>,
     lod: lod::LodManager,
+    /// While set, [`OffscreenRenderer::apply_pending_lod_resolution`] is a no-op
+    /// so a caller-forced mesh resolution survives the frame.
+    lod_locked: bool,
     additional_renders: Vec<Box<dyn AdditionalRender>>,
     /// Reusable CPU scratch buffers for impostor/bond instances, kept across
     /// frames so trajectory playback refills them without reallocating.
@@ -221,6 +224,7 @@ impl OffscreenRenderer {
             width: 0,
             height: 0,
             lod: lod::LodManager::new(preference.lod_settings()),
+            lod_locked: false,
             preference,
             color_texture: None,
             depth_texture: None,
@@ -320,6 +324,99 @@ impl OffscreenRenderer {
 
     pub fn texture_id(&self) -> Option<TextureId> {
         self.texture_id
+    }
+
+    /// Current color-target size in pixels, or `(0, 0)` before the first
+    /// [`Self::ensure_resources`].
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Copy the color target back to the CPU as tightly packed, top-down RGBA8
+    /// rows (`width * height * 4` bytes).
+    ///
+    /// The bytes are the raw target contents, which are **premultiplied** wherever
+    /// anything translucent was drawn: the pipelines blend with
+    /// [`wgpu::BlendState::ALPHA_BLENDING`], so a fragment of opacity `a` over a
+    /// transparent clear lands as `rgb = a * color`, `alpha = a`. Callers writing
+    /// a PNG have to divide the color through by alpha first — that is what
+    /// [`crate::InteractiveMoleculeViewport::render_image`] does. With an opaque
+    /// background every pixel comes back at `alpha = 1` and the distinction
+    /// disappears.
+    ///
+    /// Blocks until the GPU finishes the copy, so call it for an explicit export
+    /// rather than per frame.
+    pub fn read_rgba(&self, render_state: &egui_wgpu::RenderState) -> Result<Vec<u8>, String> {
+        let texture = self
+            .color_texture
+            .as_ref()
+            .ok_or_else(|| "No color target to read; render a frame first".to_string())?;
+        let (width, height) = (self.width, self.height);
+        if width == 0 || height == 0 {
+            return Err("Color target has zero size".to_string());
+        }
+
+        // `copy_texture_to_buffer` requires each row to start on a 256-byte
+        // boundary, so the staging buffer is padded and the rows are compacted
+        // again after mapping.
+        let unpadded = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+
+        let device = &render_state.device;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen-readback"),
+            size: (padded as u64) * (height as u64),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("offscreen-readback-encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = render_state.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|e| format!("Readback poll failed: {e}"))?;
+
+        let mut out = Vec::with_capacity((unpadded as usize) * (height as usize));
+        {
+            let mapped = slice.get_mapped_range();
+            for row in 0..height as usize {
+                let start = row * padded as usize;
+                out.extend_from_slice(&mapped[start..start + unpadded as usize]);
+            }
+        }
+        staging.unmap();
+
+        Ok(out)
     }
 
     pub fn ensure_resources(
@@ -547,10 +644,10 @@ impl OffscreenRenderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.10,
-                            b: 0.14,
-                            a: 1.0,
+                            r: frame.clear_color[0] as f64,
+                            g: frame.clear_color[1] as f64,
+                            b: frame.clear_color[2] as f64,
+                            a: frame.clear_color[3] as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -572,99 +669,141 @@ impl OffscreenRenderer {
             // behind it (and any additional render drawn later in this pass)
             // stay depth-culled no matter how low the alpha goes. Per-atom
             // colors carry their own alpha, so check those too.
-            let translucent = frame.molecule_opacity < 1.0
+            let molecule_translucent = frame.molecule_opacity < 1.0
                 || frame
                     .atom_colors
                     .is_some_and(|colors| colors.iter().any(|color| color[3] < 1.0));
-            let depth_write = !translucent;
 
-            let pipeline = if use_impostors {
-                gpu.circles_pipeline.get(depth_write)
-            } else {
-                match self.preference.render_style() {
-                    RenderStyle::BallStick if self.preference.is_low_mode() => {
-                        gpu.wire_pipeline.get(depth_write)
-                    }
-                    RenderStyle::BallStick => gpu.pipeline.get(depth_write),
-                    RenderStyle::BallOnly => gpu.pipeline.get(depth_write),
-                    RenderStyle::Circles => gpu.circles_pipeline.get(depth_write),
-                    RenderStyle::Wireframe => gpu.wire_pipeline.get(depth_write),
-                }
-            };
+            // Which additional batches are translucent, decided up front so the
+            // phase loop below can order them without re-scanning.
+            let batch_translucent: Vec<bool> = additional_batches
+                .iter()
+                .map(|(_, vertices, spheres)| {
+                    spheres.iter().any(|instance| instance.color[3] < 1.0)
+                        || vertices.iter().any(|v| v.color[3] < 1.0)
+                })
+                .collect();
 
-            pass.set_pipeline(pipeline);
-
+            // Draw every opaque thing before every translucent thing.
+            //
+            // Both groups depth-*test*, only the opaque group depth-*writes*, so
+            // this is the usual ordering for mixed geometry: the opaque pass
+            // establishes the depth buffer, then translucent fragments are
+            // correctly hidden where opaque geometry is in front of them and
+            // blended over it where they are in front.
+            //
+            // Drawing in registration order instead let an opaque batch that
+            // came later overwrite translucent geometry sitting *in front* of it,
+            // because the translucent draw had written no depth to reject it —
+            // a faded molecule in front of an opaque NDX group simply vanished.
+            //
+            // Translucent-vs-translucent is still draw-order dependent; this
+            // renderer does no depth sorting and no order-independent
+            // transparency.
+            // Every pipeline in this pass reads the same uniforms at group 0, so
+            // bind once up front. It has to be outside the phase loop below:
+            // when the molecule is translucent the opaque phase skips its draw
+            // block entirely, and binding in there left the opaque additional
+            // batches with no bind group at all (a wgpu validation failure).
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
-            if use_impostors {
-                if let Some(instance_buffer) = &gpu.circles_instance_buffer {
-                    pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
-                    pass.set_vertex_buffer(1, instance_buffer.slice(..));
-                    pass.draw(0..6, 0..gpu.circles_instance_count);
-                }
 
-                // Instanced bonds for the BallStick large-molecule fallback.
-                if bonds_as_instances {
-                    if let Some(bond_buffer) = &gpu.bond_instance_buffer {
-                        if gpu.bond_instance_count > 0 {
-                            pass.set_pipeline(gpu.bond_pipeline.get(depth_write));
-                            pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
-                            pass.set_vertex_buffer(1, bond_buffer.slice(..));
-                            pass.draw(0..gpu.bond_mesh_vertex_count, 0..gpu.bond_instance_count);
+            for translucent_phase in [false, true] {
+                if molecule_translucent == translucent_phase {
+                    let depth_write = !molecule_translucent;
+
+                    let pipeline = if use_impostors {
+                        gpu.circles_pipeline.get(depth_write)
+                    } else {
+                        match self.preference.render_style() {
+                            RenderStyle::BallStick if self.preference.is_low_mode() => {
+                                gpu.wire_pipeline.get(depth_write)
+                            }
+                            RenderStyle::BallStick => gpu.pipeline.get(depth_write),
+                            RenderStyle::BallOnly => gpu.pipeline.get(depth_write),
+                            RenderStyle::Circles => gpu.circles_pipeline.get(depth_write),
+                            RenderStyle::Wireframe => gpu.wire_pipeline.get(depth_write),
                         }
+                    };
+
+                    pass.set_pipeline(pipeline);
+
+                    if use_impostors {
+                        if let Some(instance_buffer) = &gpu.circles_instance_buffer {
+                            pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
+                            pass.set_vertex_buffer(1, instance_buffer.slice(..));
+                            pass.draw(0..6, 0..gpu.circles_instance_count);
+                        }
+
+                        // Instanced bonds for the BallStick large-molecule fallback.
+                        if bonds_as_instances {
+                            if let Some(bond_buffer) = &gpu.bond_instance_buffer {
+                                if gpu.bond_instance_count > 0 {
+                                    pass.set_pipeline(gpu.bond_pipeline.get(depth_write));
+                                    pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
+                                    pass.set_vertex_buffer(1, bond_buffer.slice(..));
+                                    pass.draw(
+                                        0..gpu.bond_mesh_vertex_count,
+                                        0..gpu.bond_instance_count,
+                                    );
+                                }
+                            }
+                        }
+                    } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
+                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        pass.draw(0..gpu.vertex_count, 0..1);
                     }
                 }
-            } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.draw(0..gpu.vertex_count, 0..1);
-            }
 
-            for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
-                additional_batches.into_iter()
-            {
-                // Same rule as the molecule: a batch carrying any translucent
-                // color skips depth writes so it doesn't hide what's behind it
-                // (e.g. a faded inactive layer covering the active one).
-                let translucent = additional_sphere_impostors
-                    .iter()
-                    .any(|instance| instance.color[3] < 1.0)
-                    || additional_vertices.iter().any(|v| v.color[3] < 1.0);
-                let depth_write = !translucent;
+                for (index, (pipeline_kind, additional_vertices, additional_sphere_impostors)) in
+                    additional_batches.iter().enumerate()
+                {
+                    if batch_translucent[index] != translucent_phase {
+                        continue;
+                    }
+                    let depth_write = !batch_translucent[index];
+                    let pipeline_kind = *pipeline_kind;
 
-                if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
-                    let additional_vertex_buffer =
-                        render_state
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("offscreen-additional-vertex-buffer"),
-                                contents: bytemuck::cast_slice(&additional_vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                    if !additional_vertices.is_empty()
+                        && pipeline_kind != GpuPipeline::SphereImpostor
+                    {
+                        let additional_vertex_buffer =
+                            render_state
+                                .device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("offscreen-additional-vertex-buffer"),
+                                    contents: bytemuck::cast_slice(additional_vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
 
-                    let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind, depth_write);
-                    pass.set_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
-                    pass.draw(0..additional_vertices.len() as u32, 0..1);
-                }
+                        let pipeline =
+                            Self::additional_pipeline_for(gpu, pipeline_kind, depth_write);
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
+                        pass.draw(0..additional_vertices.len() as u32, 0..1);
+                    }
 
-                if !additional_sphere_impostors.is_empty() {
-                    let sphere_instance_buffer =
-                        render_state
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("offscreen-additional-sphere-instance-buffer"),
-                                contents: bytemuck::cast_slice(&additional_sphere_impostors),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                    if !additional_sphere_impostors.is_empty() {
+                        let sphere_instance_buffer =
+                            render_state
+                                .device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some(
+                                        "offscreen-additional-sphere-instance-buffer",
+                                    ),
+                                    contents: bytemuck::cast_slice(additional_sphere_impostors),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
 
-                    let pipeline = Self::additional_pipeline_for(
-                        gpu,
-                        GpuPipeline::SphereImpostor,
-                        depth_write,
-                    );
-                    pass.set_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
-                    pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
-                    pass.draw(0..6, 0..additional_sphere_impostors.len() as u32);
+                        let pipeline = Self::additional_pipeline_for(
+                            gpu,
+                            GpuPipeline::SphereImpostor,
+                            depth_write,
+                        );
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
+                        pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
+                        pass.draw(0..6, 0..additional_sphere_impostors.len() as u32);
+                    }
                 }
             }
         }
@@ -708,7 +847,20 @@ impl OffscreenRenderer {
         self.lod.submit_distance(distance);
     }
 
+    /// Stop the LOD manager from changing the mesh resolution.
+    ///
+    /// Image export forces a high resolution for one frame, and
+    /// [`Self::apply_pending_lod_resolution`] runs at the top of every render —
+    /// so without this, a queued LOD decision would silently undo it and the
+    /// export would come out faceted.
+    pub fn set_lod_locked(&mut self, locked: bool) {
+        self.lod_locked = locked;
+    }
+
     fn apply_pending_lod_resolution(&mut self) {
+        if self.lod_locked {
+            return;
+        }
         let Some(target_resolution) = self.lod.poll_resolution() else {
             return;
         };
@@ -737,7 +889,11 @@ impl OffscreenRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC so `read_rgba` can pull the frame back to the CPU for
+            // image export. Without it the copy fails wgpu validation.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());

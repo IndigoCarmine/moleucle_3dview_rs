@@ -572,7 +572,13 @@ fn vs_main(
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let base = in.color.rgb;
     let n = normalize(in.normal);
-    let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
+    // Camera-relative key light — see the note in CIRCLES_SHADER: a world-fixed
+    // direction made brightness depend on which way the camera happened to face.
+    let l = normalize(
+        uniforms.camera_right.xyz * 0.4
+        + uniforms.camera_up.xyz * 0.6
+        - uniforms.camera_forward.xyz
+    );
     let diffuse = max(dot(n, l), 0.0);
     let ambient = 0.22;
     let standard_lit = base * (ambient + 0.78 * diffuse);
@@ -757,8 +763,17 @@ fn fs_main(in: VSOut) -> FSOut {
     out.depth =
         clip.z / clip.w * 0.5 + 0.5;
 
-    let light_dir =
-        normalize(vec3<f32>(0.3, 0.5, 1.0));
+    // Key light fixed relative to the camera rather than the world. A
+    // world-fixed direction leaves the camera-facing hemisphere unlit over half
+    // of all orbits, collapsing everything to `ambient` — mean brightness
+    // measured 3.4x apart between camera angles, and the default view happened
+    // to be one of the dark ones. Offset up and to the right of the viewer so
+    // spheres still shade across their face instead of reading as flat discs.
+    let light_dir = normalize(
+        uniforms.camera_right.xyz * 0.4
+        + uniforms.camera_up.xyz * 0.6
+        - uniforms.camera_forward.xyz
+    );
 
     let diffuse =
         max(dot(world_normal, light_dir), 0.0);
@@ -833,7 +848,13 @@ fn vs_main(
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
-    let l = normalize(vec3<f32>(0.35, 0.75, 0.55));
+    // Camera-relative key light, matching the atom shaders so bonds and the
+    // spheres they join are lit from the same side.
+    let l = normalize(
+        uniforms.camera_right.xyz * 0.4
+        + uniforms.camera_up.xyz * 0.6
+        - uniforms.camera_forward.xyz
+    );
     let diffuse = max(dot(n, l), 0.0);
     let ambient = 0.25;
     return vec4<f32>(in.color.rgb * (ambient + 0.75 * diffuse), in.color.a);
