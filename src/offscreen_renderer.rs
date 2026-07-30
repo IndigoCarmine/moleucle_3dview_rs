@@ -669,99 +669,141 @@ impl OffscreenRenderer {
             // behind it (and any additional render drawn later in this pass)
             // stay depth-culled no matter how low the alpha goes. Per-atom
             // colors carry their own alpha, so check those too.
-            let translucent = frame.molecule_opacity < 1.0
+            let molecule_translucent = frame.molecule_opacity < 1.0
                 || frame
                     .atom_colors
                     .is_some_and(|colors| colors.iter().any(|color| color[3] < 1.0));
-            let depth_write = !translucent;
 
-            let pipeline = if use_impostors {
-                gpu.circles_pipeline.get(depth_write)
-            } else {
-                match self.preference.render_style() {
-                    RenderStyle::BallStick if self.preference.is_low_mode() => {
-                        gpu.wire_pipeline.get(depth_write)
-                    }
-                    RenderStyle::BallStick => gpu.pipeline.get(depth_write),
-                    RenderStyle::BallOnly => gpu.pipeline.get(depth_write),
-                    RenderStyle::Circles => gpu.circles_pipeline.get(depth_write),
-                    RenderStyle::Wireframe => gpu.wire_pipeline.get(depth_write),
-                }
-            };
+            // Which additional batches are translucent, decided up front so the
+            // phase loop below can order them without re-scanning.
+            let batch_translucent: Vec<bool> = additional_batches
+                .iter()
+                .map(|(_, vertices, spheres)| {
+                    spheres.iter().any(|instance| instance.color[3] < 1.0)
+                        || vertices.iter().any(|v| v.color[3] < 1.0)
+                })
+                .collect();
 
-            pass.set_pipeline(pipeline);
-
+            // Draw every opaque thing before every translucent thing.
+            //
+            // Both groups depth-*test*, only the opaque group depth-*writes*, so
+            // this is the usual ordering for mixed geometry: the opaque pass
+            // establishes the depth buffer, then translucent fragments are
+            // correctly hidden where opaque geometry is in front of them and
+            // blended over it where they are in front.
+            //
+            // Drawing in registration order instead let an opaque batch that
+            // came later overwrite translucent geometry sitting *in front* of it,
+            // because the translucent draw had written no depth to reject it —
+            // a faded molecule in front of an opaque NDX group simply vanished.
+            //
+            // Translucent-vs-translucent is still draw-order dependent; this
+            // renderer does no depth sorting and no order-independent
+            // transparency.
+            // Every pipeline in this pass reads the same uniforms at group 0, so
+            // bind once up front. It has to be outside the phase loop below:
+            // when the molecule is translucent the opaque phase skips its draw
+            // block entirely, and binding in there left the opaque additional
+            // batches with no bind group at all (a wgpu validation failure).
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
-            if use_impostors {
-                if let Some(instance_buffer) = &gpu.circles_instance_buffer {
-                    pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
-                    pass.set_vertex_buffer(1, instance_buffer.slice(..));
-                    pass.draw(0..6, 0..gpu.circles_instance_count);
-                }
 
-                // Instanced bonds for the BallStick large-molecule fallback.
-                if bonds_as_instances {
-                    if let Some(bond_buffer) = &gpu.bond_instance_buffer {
-                        if gpu.bond_instance_count > 0 {
-                            pass.set_pipeline(gpu.bond_pipeline.get(depth_write));
-                            pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
-                            pass.set_vertex_buffer(1, bond_buffer.slice(..));
-                            pass.draw(0..gpu.bond_mesh_vertex_count, 0..gpu.bond_instance_count);
+            for translucent_phase in [false, true] {
+                if molecule_translucent == translucent_phase {
+                    let depth_write = !molecule_translucent;
+
+                    let pipeline = if use_impostors {
+                        gpu.circles_pipeline.get(depth_write)
+                    } else {
+                        match self.preference.render_style() {
+                            RenderStyle::BallStick if self.preference.is_low_mode() => {
+                                gpu.wire_pipeline.get(depth_write)
+                            }
+                            RenderStyle::BallStick => gpu.pipeline.get(depth_write),
+                            RenderStyle::BallOnly => gpu.pipeline.get(depth_write),
+                            RenderStyle::Circles => gpu.circles_pipeline.get(depth_write),
+                            RenderStyle::Wireframe => gpu.wire_pipeline.get(depth_write),
                         }
+                    };
+
+                    pass.set_pipeline(pipeline);
+
+                    if use_impostors {
+                        if let Some(instance_buffer) = &gpu.circles_instance_buffer {
+                            pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
+                            pass.set_vertex_buffer(1, instance_buffer.slice(..));
+                            pass.draw(0..6, 0..gpu.circles_instance_count);
+                        }
+
+                        // Instanced bonds for the BallStick large-molecule fallback.
+                        if bonds_as_instances {
+                            if let Some(bond_buffer) = &gpu.bond_instance_buffer {
+                                if gpu.bond_instance_count > 0 {
+                                    pass.set_pipeline(gpu.bond_pipeline.get(depth_write));
+                                    pass.set_vertex_buffer(0, gpu.bond_mesh_buffer.slice(..));
+                                    pass.set_vertex_buffer(1, bond_buffer.slice(..));
+                                    pass.draw(
+                                        0..gpu.bond_mesh_vertex_count,
+                                        0..gpu.bond_instance_count,
+                                    );
+                                }
+                            }
+                        }
+                    } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
+                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        pass.draw(0..gpu.vertex_count, 0..1);
                     }
                 }
-            } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                pass.draw(0..gpu.vertex_count, 0..1);
-            }
 
-            for (pipeline_kind, additional_vertices, additional_sphere_impostors) in
-                additional_batches.into_iter()
-            {
-                // Same rule as the molecule: a batch carrying any translucent
-                // color skips depth writes so it doesn't hide what's behind it
-                // (e.g. a faded inactive layer covering the active one).
-                let translucent = additional_sphere_impostors
-                    .iter()
-                    .any(|instance| instance.color[3] < 1.0)
-                    || additional_vertices.iter().any(|v| v.color[3] < 1.0);
-                let depth_write = !translucent;
+                for (index, (pipeline_kind, additional_vertices, additional_sphere_impostors)) in
+                    additional_batches.iter().enumerate()
+                {
+                    if batch_translucent[index] != translucent_phase {
+                        continue;
+                    }
+                    let depth_write = !batch_translucent[index];
+                    let pipeline_kind = *pipeline_kind;
 
-                if !additional_vertices.is_empty() && pipeline_kind != GpuPipeline::SphereImpostor {
-                    let additional_vertex_buffer =
-                        render_state
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("offscreen-additional-vertex-buffer"),
-                                contents: bytemuck::cast_slice(&additional_vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                    if !additional_vertices.is_empty()
+                        && pipeline_kind != GpuPipeline::SphereImpostor
+                    {
+                        let additional_vertex_buffer =
+                            render_state
+                                .device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("offscreen-additional-vertex-buffer"),
+                                    contents: bytemuck::cast_slice(additional_vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
 
-                    let pipeline = Self::additional_pipeline_for(gpu, pipeline_kind, depth_write);
-                    pass.set_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
-                    pass.draw(0..additional_vertices.len() as u32, 0..1);
-                }
+                        let pipeline =
+                            Self::additional_pipeline_for(gpu, pipeline_kind, depth_write);
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
+                        pass.draw(0..additional_vertices.len() as u32, 0..1);
+                    }
 
-                if !additional_sphere_impostors.is_empty() {
-                    let sphere_instance_buffer =
-                        render_state
-                            .device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("offscreen-additional-sphere-instance-buffer"),
-                                contents: bytemuck::cast_slice(&additional_sphere_impostors),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                    if !additional_sphere_impostors.is_empty() {
+                        let sphere_instance_buffer =
+                            render_state
+                                .device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some(
+                                        "offscreen-additional-sphere-instance-buffer",
+                                    ),
+                                    contents: bytemuck::cast_slice(additional_sphere_impostors),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
 
-                    let pipeline = Self::additional_pipeline_for(
-                        gpu,
-                        GpuPipeline::SphereImpostor,
-                        depth_write,
-                    );
-                    pass.set_pipeline(pipeline);
-                    pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
-                    pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
-                    pass.draw(0..6, 0..additional_sphere_impostors.len() as u32);
+                        let pipeline = Self::additional_pipeline_for(
+                            gpu,
+                            GpuPipeline::SphereImpostor,
+                            depth_write,
+                        );
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
+                        pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
+                        pass.draw(0..6, 0..additional_sphere_impostors.len() as u32);
+                    }
                 }
             }
         }
