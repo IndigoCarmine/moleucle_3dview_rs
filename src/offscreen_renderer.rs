@@ -1,13 +1,12 @@
 use crate::additional_render::{AdditionalRender, GpuPipeline};
 use crate::frame_state::RenderFrameState;
 use crate::render_state::SharedRenderStates;
-use crate::scene_types::{Scene, SphereImpostorInstance};
+use crate::scene_types::Scene;
 use crate::viewer::ColorFn;
 use crate::Molecule;
 use egui::TextureId;
 use egui_wgpu::wgpu;
 use lin_alg::f32::Vec3;
-use wgpu::util::DeviceExt;
 
 mod gpu;
 mod lod;
@@ -189,10 +188,41 @@ pub struct OffscreenRenderer {
     /// so a caller-forced mesh resolution survives the frame.
     lod_locked: bool,
     additional_renders: Vec<Box<dyn AdditionalRender>>,
+    /// Per-overlay CPU scratch and GPU buffers, index-aligned with
+    /// `additional_renders`. Kept across frames so an unchanged overlay costs a
+    /// `write_buffer` into storage it already owns instead of a fresh
+    /// allocation on both sides.
+    additional_batches: Vec<AdditionalBatch>,
     /// Reusable CPU scratch buffers for impostor/bond instances, kept across
     /// frames so trajectory playback refills them without reallocating.
     scratch_circle_instances: Vec<CircleInstance>,
     scratch_bond_instances: Vec<BondInstance>,
+}
+
+/// One [`AdditionalRender`]'s retained CPU scratch and GPU buffers.
+///
+/// Overlay geometry used to be rebuilt into fresh `Vec`s and uploaded to a
+/// brand-new `wgpu::Buffer` created *inside the render pass*, every batch, every
+/// frame. With several overlays registered that is a steady stream of buffer
+/// creation and CPU allocation on the render path; the main molecule has had a
+/// cache and reusable scratch for exactly this reason.
+#[derive(Default)]
+struct AdditionalBatch {
+    /// Reused across frames; cleared and refilled by `update_scene`.
+    scene: Scene,
+    /// The scene's entities baked into world-space triangles.
+    vertices: Vec<Vertex>,
+    pipeline: GpuPipeline,
+    vertex_buffer: Option<wgpu::Buffer>,
+    vertex_capacity: usize,
+    vertex_count: u32,
+    sphere_buffer: Option<wgpu::Buffer>,
+    sphere_capacity: usize,
+    sphere_count: u32,
+    /// Whether this batch has to draw in the translucent phase. Computed once
+    /// when the batch is rebuilt rather than by rescanning every vertex and
+    /// every impostor on every frame.
+    translucent: bool,
 }
 
 impl OffscreenRenderer {
@@ -235,6 +265,7 @@ impl OffscreenRenderer {
             cylinder_mesh: RenderMesh::new_cylinder_open_ended(1.0, 1.0, cylinder_sides),
             geometry_cache_key: None,
             additional_renders: Vec::new(),
+            additional_batches: Vec::new(),
             scratch_circle_instances: Vec::new(),
             scratch_bond_instances: Vec::new(),
         }
@@ -447,6 +478,8 @@ impl OffscreenRenderer {
 
     pub fn add_additional_render(&mut self, render: Box<dyn AdditionalRender>) {
         self.additional_renders.push(render);
+        // Keep the retained batches index-aligned with the overlays.
+        self.additional_batches.push(AdditionalBatch::default());
     }
 
     fn additional_pipeline_for(
@@ -537,23 +570,32 @@ impl OffscreenRenderer {
             Self::fill_bond_instances(&mut bond_scratch, frame);
         }
 
-        let additional_batches: Vec<(GpuPipeline, Vec<Vertex>, Vec<SphereImpostorInstance>)> = self
-            .additional_renders
-            .iter()
-            .map(|additional| {
-                let mut additional_scene = Scene {
-                    meshes: Vec::new(),
-                    entities: Vec::new(),
-                    sphere_impostors: Vec::new(),
-                };
-                additional.update_scene(&mut additional_scene, frame);
-                (
-                    additional.gpu_pipeline(),
-                    self.build_additional_scene_vertices(&additional_scene),
-                    additional_scene.sphere_impostors,
-                )
-            })
-            .collect();
+        // Rebuild every overlay's CPU geometry into its retained scratch. The
+        // buffers keep their capacity across frames, so a steady overlay costs
+        // no allocation here.
+        //
+        // `additional_batches` is a direct field rather than something reached
+        // through a `&mut self` method on purpose: the render pass below holds
+        // `self.gpu` mutably while still reading `self.preference`, and only
+        // disjoint field borrows make that legal.
+        for (index, additional) in self.additional_renders.iter().enumerate() {
+            let batch = &mut self.additional_batches[index];
+            batch.scene.clear();
+            additional.update_scene(&mut batch.scene, frame);
+            batch.pipeline = additional.gpu_pipeline();
+
+            batch.vertices.clear();
+            append_scene_triangles(&batch.scene, &mut batch.vertices, MAX_RENDER_VERTICES);
+
+            // Decide the draw phase once, here, instead of rescanning every
+            // vertex and impostor of every batch on every frame.
+            batch.translucent = batch
+                .scene
+                .sphere_impostors
+                .iter()
+                .any(|instance| instance.color[3] < 1.0)
+                || batch.vertices.iter().any(|v| v.color[3] < 1.0);
+        }
 
         let gpu = self
             .gpu
@@ -603,6 +645,40 @@ impl OffscreenRenderer {
                 &bond_scratch,
             );
             self.geometry_cache_key = Some(cache_key);
+        }
+
+        // Upload the overlay batches before the pass opens. `upload_instances`
+        // reuses the existing buffer whenever the new data fits, so a steady
+        // overlay costs one `write_buffer` instead of creating a buffer per
+        // batch per frame from inside the render pass.
+        for batch in &mut self.additional_batches {
+            batch.vertex_count = if batch.vertices.is_empty()
+                || batch.pipeline == GpuPipeline::SphereImpostor
+            {
+                0
+            } else {
+                upload_instances(
+                    &render_state.device,
+                    &render_state.queue,
+                    &mut batch.vertex_buffer,
+                    &mut batch.vertex_capacity,
+                    "offscreen-additional-vertex-buffer",
+                    &batch.vertices,
+                )
+            };
+
+            batch.sphere_count = if batch.scene.sphere_impostors.is_empty() {
+                0
+            } else {
+                upload_instances(
+                    &render_state.device,
+                    &render_state.queue,
+                    &mut batch.sphere_buffer,
+                    &mut batch.sphere_capacity,
+                    "offscreen-additional-sphere-instance-buffer",
+                    &batch.scene.sphere_impostors,
+                )
+            };
         }
 
         let focal = 1.0 / (frame.fov_y * 0.5).tan();
@@ -675,16 +751,6 @@ impl OffscreenRenderer {
                     .atom_colors
                     .is_some_and(|colors| colors.iter().any(|color| color[3] < 1.0));
 
-            // Which additional batches are translucent, decided up front so the
-            // phase loop below can order them without re-scanning.
-            let batch_translucent: Vec<bool> = additional_batches
-                .iter()
-                .map(|(_, vertices, spheres)| {
-                    spheres.iter().any(|instance| instance.color[3] < 1.0)
-                        || vertices.iter().any(|v| v.color[3] < 1.0)
-                })
-                .collect();
-
             // Draw every opaque thing before every translucent thing.
             //
             // Both groups depth-*test*, only the opaque group depth-*writes*, so
@@ -755,55 +821,34 @@ impl OffscreenRenderer {
                     }
                 }
 
-                for (index, (pipeline_kind, additional_vertices, additional_sphere_impostors)) in
-                    additional_batches.iter().enumerate()
-                {
-                    if batch_translucent[index] != translucent_phase {
+                for batch in &self.additional_batches {
+                    if batch.translucent != translucent_phase {
                         continue;
                     }
-                    let depth_write = !batch_translucent[index];
-                    let pipeline_kind = *pipeline_kind;
+                    let depth_write = !batch.translucent;
 
-                    if !additional_vertices.is_empty()
-                        && pipeline_kind != GpuPipeline::SphereImpostor
-                    {
-                        let additional_vertex_buffer =
-                            render_state
-                                .device
-                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                    label: Some("offscreen-additional-vertex-buffer"),
-                                    contents: bytemuck::cast_slice(additional_vertices),
-                                    usage: wgpu::BufferUsages::VERTEX,
-                                });
-
-                        let pipeline =
-                            Self::additional_pipeline_for(gpu, pipeline_kind, depth_write);
-                        pass.set_pipeline(pipeline);
-                        pass.set_vertex_buffer(0, additional_vertex_buffer.slice(..));
-                        pass.draw(0..additional_vertices.len() as u32, 0..1);
+                    if batch.vertex_count > 0 {
+                        if let Some(vertex_buffer) = &batch.vertex_buffer {
+                            let pipeline =
+                                Self::additional_pipeline_for(gpu, batch.pipeline, depth_write);
+                            pass.set_pipeline(pipeline);
+                            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                            pass.draw(0..batch.vertex_count, 0..1);
+                        }
                     }
 
-                    if !additional_sphere_impostors.is_empty() {
-                        let sphere_instance_buffer =
-                            render_state
-                                .device
-                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                    label: Some(
-                                        "offscreen-additional-sphere-instance-buffer",
-                                    ),
-                                    contents: bytemuck::cast_slice(additional_sphere_impostors),
-                                    usage: wgpu::BufferUsages::VERTEX,
-                                });
-
-                        let pipeline = Self::additional_pipeline_for(
-                            gpu,
-                            GpuPipeline::SphereImpostor,
-                            depth_write,
-                        );
-                        pass.set_pipeline(pipeline);
-                        pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
-                        pass.set_vertex_buffer(1, sphere_instance_buffer.slice(..));
-                        pass.draw(0..6, 0..additional_sphere_impostors.len() as u32);
+                    if batch.sphere_count > 0 {
+                        if let Some(sphere_buffer) = &batch.sphere_buffer {
+                            let pipeline = Self::additional_pipeline_for(
+                                gpu,
+                                GpuPipeline::SphereImpostor,
+                                depth_write,
+                            );
+                            pass.set_pipeline(pipeline);
+                            pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
+                            pass.set_vertex_buffer(1, sphere_buffer.slice(..));
+                            pass.draw(0..6, 0..batch.sphere_count);
+                        }
                     }
                 }
             }
@@ -1024,55 +1069,54 @@ impl OffscreenRenderer {
         }
     }
 
-    fn build_additional_scene_vertices(&self, scene: &Scene) -> Vec<Vertex> {
-        let max_vertices = MAX_RENDER_VERTICES;
-        let mut vertices = Vec::new();
+}
 
-        for entity in &scene.entities {
-            let Some(mesh) = scene.meshes.get(entity.mesh) else {
-                continue;
-            };
+/// Bake a [`Scene`]'s entities into world-space triangles, appending to `out`.
+///
+/// Stops early once `max_vertices` is reached rather than growing without
+/// bound; the caller clears `out` first, so its capacity is reused frame to
+/// frame.
+fn append_scene_triangles(scene: &Scene, out: &mut Vec<Vertex>, max_vertices: usize) {
+    for entity in &scene.entities {
+        let Some(mesh) = scene.meshes.get(entity.mesh) else {
+            continue;
+        };
 
-            let scale =
-                entity
-                    .scale_partial
-                    .unwrap_or(Vec3::new(entity.scale, entity.scale, entity.scale));
-            // Fold the entity's opacity into the color's alpha channel so both
-            // per-color alpha and the entity-wide opacity affect blending.
-            let color = [
-                entity.color.0,
-                entity.color.1,
-                entity.color.2,
-                entity.color.3 * entity.opacity,
-            ];
+        let scale = entity
+            .scale_partial
+            .unwrap_or(Vec3::new(entity.scale, entity.scale, entity.scale));
+        let inv_scale = inverse_scale(scale);
+        // Fold the entity's opacity into the color's alpha channel so both
+        // per-color alpha and the entity-wide opacity affect blending.
+        let color = [
+            entity.color.0,
+            entity.color.1,
+            entity.color.2,
+            entity.color.3 * entity.opacity,
+        ];
 
-            for tri in mesh.indices.chunks_exact(3) {
-                if vertices.len().saturating_add(3) > max_vertices {
-                    return vertices;
-                }
+        for tri in mesh.indices.chunks_exact(3) {
+            if out.len().saturating_add(3) > max_vertices {
+                return;
+            }
 
-                for &idx in tri {
-                    let Some(src) = mesh.vertices.get(idx) else {
-                        return vertices;
-                    };
+            for &idx in tri {
+                let Some(src) = mesh.vertices.get(idx) else {
+                    return;
+                };
 
-                    let p = Vec3::new(src.position[0], src.position[1], src.position[2]);
-                    let p_scaled = Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z);
-                    let p_world = entity.orientation.rotate_vec(p_scaled) + entity.position;
-
-                    let n = src.normal;
-                    let n_world = entity.orientation.rotate_vec(n).to_normalized();
-
-                    vertices.push(Vertex {
-                        position: [p_world.x, p_world.y, p_world.z],
-                        normal: [n_world.x, n_world.y, n_world.z],
-                        color,
-                    });
-                }
+                let position = Vec3::new(src.position[0], src.position[1], src.position[2]);
+                out.push(transform_vertex(
+                    position,
+                    src.normal,
+                    entity.position,
+                    entity.orientation,
+                    scale,
+                    inv_scale,
+                    color,
+                ));
             }
         }
-
-        vertices
     }
 }
 
@@ -1096,32 +1140,67 @@ fn bond_line_offsets(order: usize) -> Vec<f32> {
     }
 }
 
+/// Componentwise reciprocal of a scale, with zero components mapped to zero.
+///
+/// Normals transform by the inverse transpose of the model matrix. For a
+/// scale-then-rotate transform that reduces to scaling the normal by the
+/// reciprocal and then applying the same rotation.
+#[inline]
+fn inverse_scale(scale: Vec3) -> Vec3 {
+    let safe = |v: f32| if v.abs() > 1e-6 { 1.0 / v } else { 0.0 };
+    Vec3::new(safe(scale.x), safe(scale.y), safe(scale.z))
+}
+
+/// Place one mesh vertex in world space.
+///
+/// Both the molecule geometry and the overlay geometry go through here, which is
+/// the point: the overlay path used to rotate the normal without the
+/// inverse-scale correction. Every `add_cylinder` sets a `scale_partial` of
+/// `(radius, length, radius)` — extremely non-uniform — so overlay cylinders
+/// were lit as though they were unscaled, giving axis triads and interaction
+/// sticks a flat, banded look that no amount of tweaking the light would fix.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn transform_vertex(
+    position: Vec3,
+    normal: Vec3,
+    entity_position: Vec3,
+    orientation: lin_alg::f32::Quaternion,
+    scale: Vec3,
+    inv_scale: Vec3,
+    color: [f32; 4],
+) -> Vertex {
+    let scaled = Vec3::new(
+        position.x * scale.x,
+        position.y * scale.y,
+        position.z * scale.z,
+    );
+    let world = orientation.rotate_vec(scaled) + entity_position;
+
+    let n_scaled = Vec3::new(
+        normal.x * inv_scale.x,
+        normal.y * inv_scale.y,
+        normal.z * inv_scale.z,
+    );
+    let n_world = orientation.rotate_vec(n_scaled).to_normalized();
+
+    Vertex {
+        position: [world.x, world.y, world.z],
+        normal: [n_world.x, n_world.y, n_world.z],
+        color,
+    }
+}
+
 fn append_mesh_triangles(
     out: &mut Vec<Vertex>,
     mesh: &RenderMesh,
-    position: lin_alg::f32::Vec3,
+    position: Vec3,
     orientation: lin_alg::f32::Quaternion,
-    scale: lin_alg::f32::Vec3,
+    scale: Vec3,
     color: [f32; 4],
     max_vertices: usize,
 ) -> bool {
-    let inv_scale = lin_alg::f32::Vec3::new(
-        if scale.x.abs() > 1e-6 {
-            1.0 / scale.x
-        } else {
-            0.0
-        },
-        if scale.y.abs() > 1e-6 {
-            1.0 / scale.y
-        } else {
-            0.0
-        },
-        if scale.z.abs() > 1e-6 {
-            1.0 / scale.z
-        } else {
-            0.0
-        },
-    );
+    let inv_scale = inverse_scale(scale);
 
     for tri in mesh.indices.chunks_exact(3) {
         if out.len().saturating_add(3) > max_vertices {
@@ -1133,20 +1212,15 @@ fn append_mesh_triangles(
                 return false;
             };
 
-            let p = lin_alg::f32::Vec3::new(src.position[0], src.position[1], src.position[2]);
-            let p_scaled = lin_alg::f32::Vec3::new(p.x * scale.x, p.y * scale.y, p.z * scale.z);
-            let p_world = orientation.rotate_vec(p_scaled) + position;
-
-            let n = lin_alg::f32::Vec3::new(src.normal[0], src.normal[1], src.normal[2]);
-            let n_scaled =
-                lin_alg::f32::Vec3::new(n.x * inv_scale.x, n.y * inv_scale.y, n.z * inv_scale.z);
-            let n_world = orientation.rotate_vec(n_scaled).to_normalized();
-
-            out.push(Vertex {
-                position: [p_world.x, p_world.y, p_world.z],
-                normal: [n_world.x, n_world.y, n_world.z],
+            out.push(transform_vertex(
+                Vec3::new(src.position[0], src.position[1], src.position[2]),
+                Vec3::new(src.normal[0], src.normal[1], src.normal[2]),
+                position,
+                orientation,
+                scale,
+                inv_scale,
                 color,
-            });
+            ));
         }
     }
 
@@ -1421,6 +1495,110 @@ mod tests {
         renderer.set_mesh_resolution(16);
         renderer.set_render_style(RenderStyle::Wireframe);
         assert_ne!(base, key_for(&renderer, &viewer));
+    }
+
+    /// Normals transform by the inverse transpose of the model matrix, so a
+    /// non-uniform scale must scale the normal by the *reciprocal*. Overlay
+    /// geometry used to skip that correction while the molecule path applied it,
+    /// and `add_cylinder` always sets a `(radius, length, radius)` scale -- so
+    /// every overlay cylinder was lit as though it were unscaled.
+    #[test]
+    fn non_uniform_scale_corrects_the_normal() {
+        use crate::scene_types::{Entity, Mesh, Vertex as SceneVertex};
+        use lin_alg::f32::Quaternion;
+
+        // A normal at 45 degrees in the XY plane, so stretching Y has to bend it.
+        let diagonal = Vec3::new(1.0, 1.0, 0.0).to_normalized();
+        let mut scene = Scene::default();
+        scene.meshes.push(Mesh {
+            vertices: vec![
+                SceneVertex::new([0.0, 0.0, 0.0], diagonal),
+                SceneVertex::new([1.0, 0.0, 0.0], diagonal),
+                SceneVertex::new([0.0, 1.0, 0.0], diagonal),
+            ],
+            indices: vec![0, 1, 2],
+        });
+
+        let mut entity = Entity::new(
+            0,
+            Vec3::new(0.0, 0.0, 0.0),
+            Quaternion::new_identity(),
+            1.0,
+            (1.0, 1.0, 1.0, 1.0),
+            1.0,
+        );
+        entity.scale_partial = Some(Vec3::new(1.0, 4.0, 1.0));
+        scene.entities.push(entity);
+
+        let mut out = Vec::new();
+        append_scene_triangles(&scene, &mut out, MAX_RENDER_VERTICES);
+        assert_eq!(out.len(), 3);
+
+        let expected = Vec3::new(1.0, 1.0 / 4.0, 0.0).to_normalized();
+        for vertex in &out {
+            for (got, want) in vertex.normal.iter().zip([expected.x, expected.y, expected.z]) {
+                assert!(
+                    (got - want).abs() < 1e-5,
+                    "normal {:?} should be {expected:?}",
+                    vertex.normal
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scene_geometry_respects_the_vertex_budget() {
+        use crate::scene_types::{Entity, Mesh, Vertex as SceneVertex};
+        use lin_alg::f32::Quaternion;
+
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let mut scene = Scene::default();
+        scene.meshes.push(Mesh {
+            vertices: vec![
+                SceneVertex::new([0.0, 0.0, 0.0], up),
+                SceneVertex::new([1.0, 0.0, 0.0], up),
+                SceneVertex::new([0.0, 1.0, 0.0], up),
+            ],
+            indices: vec![0, 1, 2],
+        });
+        for _ in 0..10 {
+            scene.entities.push(Entity::new(
+                0,
+                Vec3::new(0.0, 0.0, 0.0),
+                Quaternion::new_identity(),
+                1.0,
+                (1.0, 1.0, 1.0, 1.0),
+                1.0,
+            ));
+        }
+
+        let mut out = Vec::new();
+        append_scene_triangles(&scene, &mut out, 12);
+        assert_eq!(out.len(), 12, "should stop at the budget, on a triangle boundary");
+    }
+
+    /// The scratch is reused across frames, so `clear` has to keep the storage
+    /// it grew -- otherwise the retained batch buys nothing.
+    #[test]
+    fn clearing_a_scene_keeps_its_capacity() {
+        let mut scene = Scene::default();
+        let first = scene.unit_cylinder_mesh(10);
+        let again = scene.unit_cylinder_mesh(10);
+        assert_eq!(first, again, "a repeated request reuses the generated mesh");
+        assert_eq!(scene.meshes.len(), 1);
+
+        // A different resolution is a different mesh.
+        assert_ne!(first, scene.unit_sphere_mesh(6, 12));
+        assert_eq!(scene.meshes.len(), 2);
+
+        let capacity = scene.meshes.capacity();
+        scene.clear();
+        assert!(scene.meshes.is_empty());
+        assert_eq!(scene.meshes.capacity(), capacity);
+
+        // Indices were invalidated by the clear, so the memo must not hand back
+        // a stale one.
+        assert_eq!(scene.unit_cylinder_mesh(10), 0);
     }
 
     /// A frame assembled by hand, without `with_geometry_revision`, must never

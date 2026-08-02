@@ -151,9 +151,65 @@ pub struct SphereImpostorInstance {
     pub color: [f32; 4],
 }
 
+/// CPU-side geometry an [`crate::AdditionalRender`] contributes to a frame.
+///
+/// `meshes` holds the distinct shapes and `entities` places, scales and colours
+/// them, so drawing a thousand identical spheres costs one mesh and a thousand
+/// small entities. [`Scene::unit_sphere_mesh`] and [`Scene::unit_cylinder_mesh`]
+/// exist to make that the easy path: they generate a unit primitive once per
+/// scene and hand back the same index on every subsequent call.
 #[derive(Clone, Debug, Default)]
 pub struct Scene {
     pub meshes: Vec<Mesh>,
     pub entities: Vec<Entity>,
     pub sphere_impostors: Vec<SphereImpostorInstance>,
+    /// `(lat, lon) -> meshes` index of the unit spheres generated so far.
+    unit_spheres: Vec<((usize, usize), usize)>,
+    /// `sides -> meshes` index of the unit cylinders generated so far.
+    unit_cylinders: Vec<(usize, usize)>,
+}
+
+impl Scene {
+    /// Index of a unit-radius sphere at this resolution, generating it on first
+    /// use and reusing it afterwards.
+    ///
+    /// Overlays that draw many spheres previously built a fresh UV sphere per
+    /// sphere per frame — hundreds of vertices allocated and thrown away for
+    /// every highlighted atom, every frame.
+    pub fn unit_sphere_mesh(&mut self, lat_segments: usize, lon_segments: usize) -> usize {
+        let key = (lat_segments, lon_segments);
+        if let Some((_, index)) = self.unit_spheres.iter().find(|(k, _)| *k == key) {
+            return *index;
+        }
+
+        let index = self.meshes.len();
+        self.meshes
+            .push(Mesh::new_sphere_uv(1.0, lat_segments, lon_segments));
+        self.unit_spheres.push((key, index));
+        index
+    }
+
+    /// Index of a unit-length, unit-radius cylinder along +Y with this many
+    /// sides, generating it on first use and reusing it afterwards.
+    pub fn unit_cylinder_mesh(&mut self, sides: usize) -> usize {
+        if let Some((_, index)) = self.unit_cylinders.iter().find(|(k, _)| *k == sides) {
+            return *index;
+        }
+
+        let index = self.meshes.len();
+        self.meshes.push(Mesh::new_cylinder(1.0, 1.0, sides));
+        self.unit_cylinders.push((sides, index));
+        index
+    }
+
+    /// Empty the scene while keeping every allocation, so the next frame refills
+    /// it without touching the allocator. The memoized unit primitives are
+    /// dropped along with `meshes`, since their indices would no longer be valid.
+    pub fn clear(&mut self) {
+        self.meshes.clear();
+        self.entities.clear();
+        self.sphere_impostors.clear();
+        self.unit_spheres.clear();
+        self.unit_cylinders.clear();
+    }
 }

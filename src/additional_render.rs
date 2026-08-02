@@ -2,12 +2,18 @@ use crate::atom_radii::vdw_radius;
 use crate::frame_state::RenderFrameState;
 use crate::offscreen_renderer::RenderStyle;
 use crate::render_state::get_state_clone_by_type;
-use crate::scene_types::{Entity, Mesh, Scene, SphereImpostorInstance};
+use crate::scene_types::{Entity, Scene, SphereImpostorInstance};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Radial segments in the cylinder [`AdditionalRender::add_cylinder`] draws.
+/// Overlay cylinders are thin sticks and box edges, so a low count reads the
+/// same and keeps the shared mesh small.
+const CYLINDER_SIDES: usize = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GpuPipeline {
+    #[default]
     Triangles,
     Wireframe,
     SphereImpostor,
@@ -47,9 +53,9 @@ pub trait AdditionalRender: Send {
         } else {
             frame.mesh_resolution.max(3)
         };
-        let sphere_mesh = Mesh::new_sphere_uv(1.0, mesh_resolution, mesh_resolution * 2);
-        let mesh_idx = scene.meshes.len();
-        scene.meshes.push(sphere_mesh);
+        // One unit sphere per resolution per scene, not one per call: overlays
+        // that highlight many atoms call this once per atom per frame.
+        let mesh_idx = scene.unit_sphere_mesh(mesh_resolution, mesh_resolution * 2);
 
         let entity = Entity::new(
             mesh_idx,
@@ -81,9 +87,9 @@ pub trait AdditionalRender: Send {
         radius: f32,
         color: (f32, f32, f32, f32),
     ) {
-        let cyl_mesh = Mesh::new_cylinder(1.0, 1.0, 10);
-        let mesh_idx = scene.meshes.len();
-        scene.meshes.push(cyl_mesh);
+        // Shared across every cylinder in the scene; unlike `add_sphere` this
+        // path has no impostor short-circuit, so it is the hotter of the two.
+        let mesh_idx = scene.unit_cylinder_mesh(CYLINDER_SIDES);
 
         let mid_point = (start + end) * 0.5;
         let direction = end - start;
@@ -244,10 +250,7 @@ impl AdditionalRender for DebugRender {
         let ray_end = origin + normalized_dir * state.ray_length;
         let midpoint = (origin + ray_end) * 0.5;
 
-        // Create cylinder mesh
-        let ray_mesh = Mesh::new_cylinder(1.0, 1.0, 8);
-        let ray_idx = scene.meshes.len();
-        scene.meshes.push(ray_mesh);
+        let ray_idx = scene.unit_cylinder_mesh(8);
 
         // Quaternion to rotate from Y-axis (default cylinder orientation) to ray direction
         let up = Vec3::new(0.0, 1.0, 0.0);
