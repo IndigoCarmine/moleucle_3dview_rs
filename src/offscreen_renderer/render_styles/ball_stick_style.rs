@@ -167,62 +167,6 @@ pub(super) fn build_ballstick_vertices(
         }
     }
 
-    if include_bonds {
-        let axis_len = 0.2;
-        let axis_radius = 0.01;
-        if low_mode {
-            let _ = append_line(
-                &mut vertices,
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(axis_len, 0.0, 0.0),
-                [1.0, 0.0, 0.0, 1.0],
-                max_vertices,
-            );
-            let _ = append_line(
-                &mut vertices,
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, axis_len, 0.0),
-                [0.0, 1.0, 0.0, 1.0],
-                max_vertices,
-            );
-            let _ = append_line(
-                &mut vertices,
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, axis_len),
-                [0.0, 0.0, 1.0, 1.0],
-                max_vertices,
-            );
-        } else {
-            let _ = append_mesh_triangles(
-                &mut vertices,
-                cylinder_mesh,
-                Vec3::new(axis_len * 0.5, 0.0, 0.0),
-                Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
-                Vec3::new(axis_radius, axis_len, axis_radius),
-                [1.0, 0.0, 0.0, 1.0],
-                max_vertices,
-            );
-            let _ = append_mesh_triangles(
-                &mut vertices,
-                cylinder_mesh,
-                Vec3::new(0.0, axis_len * 0.5, 0.0),
-                Quaternion::new_identity(),
-                Vec3::new(axis_radius, axis_len, axis_radius),
-                [0.0, 1.0, 0.0, 1.0],
-                max_vertices,
-            );
-            let _ = append_mesh_triangles(
-                &mut vertices,
-                cylinder_mesh,
-                Vec3::new(0.0, 0.0, axis_len * 0.5),
-                Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
-                Vec3::new(axis_radius, axis_len, axis_radius),
-                [0.0, 0.0, 1.0, 1.0],
-                max_vertices,
-            );
-        }
-    }
-
     vertices
 }
 
