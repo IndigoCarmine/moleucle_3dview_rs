@@ -152,24 +152,25 @@ struct Uniforms {
     camera_forward: [f32; 4],
 }
 
+/// Identifies the geometry currently uploaded to the GPU, so an unchanged frame
+/// costs a uniform write and the draw calls, with no CPU rebuild or upload.
+///
+/// Everything about the *molecule* — which molecule, its positions, its colors,
+/// its per-atom overrides — is folded into `geometry_revision`
+/// ([`RenderFrameState::geometry_revision`]). The two render settings are
+/// tracked separately because [`OffscreenRenderer::apply_pending_lod_resolution`]
+/// can change the mesh resolution at the top of a render, after the caller has
+/// already assembled the frame.
+///
+/// This deliberately does *not* key on the molecule's address. It used to, and
+/// that was the bug: `set_molecule` writes into the viewer's existing `Option`
+/// slot, so replacing the molecule left the pointer unchanged and the cache hit
+/// against geometry for a molecule that no longer existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GeometryCacheKey {
-    molecule_ptr: usize,
-    /// Changes when atom positions are updated in place (trajectory playback),
-    /// so the cached geometry rebuilds even though the molecule pointer is the
-    /// same object.
-    generation: u64,
+    geometry_revision: u64,
     render_style: RenderStyle,
-    color_fn_ptr: usize,
     mesh_resolution: usize,
-    /// Molecule opacity as raw bits (f32 isn't `Eq`); changing it must rebuild
-    /// the baked-in vertex/instance alpha.
-    molecule_opacity_bits: u32,
-    /// Identity (pointer + length) of the per-atom radius / color overrides, so
-    /// swapping or clearing them rebuilds the geometry. Matches the pointer-based
-    /// invalidation already used for `molecule_ptr`.
-    atom_radii_id: (usize, usize),
-    atom_colors_id: (usize, usize),
 }
 
 pub struct OffscreenRenderer {
@@ -1016,24 +1017,10 @@ impl OffscreenRenderer {
     }
 
     fn build_geometry_cache_key(&self, frame: &RenderFrameState<'_>) -> GeometryCacheKey {
-        let slice_id =
-            |s: Option<&[f32]>| s.map(|s| (s.as_ptr() as usize, s.len())).unwrap_or((0, 0));
-        let color_id = frame
-            .atom_colors
-            .map(|s| (s.as_ptr() as usize, s.len()))
-            .unwrap_or((0, 0));
         GeometryCacheKey {
-            molecule_ptr: frame
-                .molecule
-                .map(|mol| mol as *const Molecule as usize)
-                .unwrap_or(0),
-            generation: frame.molecule.map(|mol| mol.generation()).unwrap_or(0),
+            geometry_revision: frame.geometry_revision,
             render_style: self.preference.render_style(),
-            color_fn_ptr: frame.color_fn as usize,
             mesh_resolution: self.preference.mesh_resolution(),
-            molecule_opacity_bits: frame.molecule_opacity.to_bits(),
-            atom_radii_id: slice_id(frame.atom_radii),
-            atom_colors_id: color_id,
         }
     }
 
@@ -1297,4 +1284,170 @@ fn append_line(
     });
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::molecule::{Atom, Element};
+    use crate::viewer::{default_color_fn, MoleculeViewer};
+    use lin_alg::f32::Vec3;
+
+    fn molecule_with(atom_count: usize) -> Molecule {
+        Molecule::from_atoms_bonds(
+            (0..atom_count)
+                .map(|i| Atom {
+                    position: Vec3::new(i as f32 * 0.15, 0.0, 0.0),
+                    element: Element::new("C"),
+                    id: i,
+                    meta: None,
+                })
+                .collect(),
+            Vec::new(),
+        )
+    }
+
+    /// Build the cache key the way `render_frame_with_state` does, from a
+    /// viewer's current state.
+    fn key_for(renderer: &OffscreenRenderer, viewer: &MoleculeViewer) -> GeometryCacheKey {
+        let frame = RenderFrameState::new(
+            viewer.molecule.as_ref(),
+            [0.0; 16],
+            None,
+            1.0,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            default_color_fn,
+            None,
+            RenderStyle::BallStick,
+            16,
+            false,
+            viewer.molecule_opacity,
+        )
+        .with_geometry_revision(viewer.revision())
+        .with_atom_attrs(
+            viewer.atom_radii.as_deref(),
+            viewer.atom_colors.as_deref(),
+        );
+
+        renderer.build_geometry_cache_key(&frame)
+    }
+
+    #[test]
+    fn an_unchanged_viewer_keeps_the_same_key() {
+        let renderer = OffscreenRenderer::new();
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(molecule_with(3));
+
+        assert_eq!(key_for(&renderer, &viewer), key_for(&renderer, &viewer));
+    }
+
+    /// The regression this whole key exists for: `set_molecule` writes into the
+    /// viewer's existing `Option<Molecule>` slot, so a pointer-based key saw two
+    /// different molecules as identical and left the first one on screen.
+    #[test]
+    fn replacing_the_molecule_invalidates_the_key() {
+        let renderer = OffscreenRenderer::new();
+        let mut viewer = MoleculeViewer::new();
+
+        viewer.set_molecule(molecule_with(3));
+        let first = key_for(&renderer, &viewer);
+
+        viewer.set_molecule(molecule_with(5));
+        let second = key_for(&renderer, &viewer);
+        assert_ne!(first, second);
+
+        // Even an identical replacement must invalidate: the caller asked for a
+        // new molecule, and the renderer cannot cheaply prove it is the same.
+        viewer.set_molecule(molecule_with(5));
+        assert_ne!(second, key_for(&renderer, &viewer));
+    }
+
+    #[test]
+    fn every_geometry_input_invalidates_the_key() {
+        let renderer = OffscreenRenderer::new();
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(molecule_with(3));
+
+        let mut previous = key_for(&renderer, &viewer);
+        let mut assert_changed = |viewer: &MoleculeViewer, what: &str| {
+            let next = key_for(&renderer, viewer);
+            assert_ne!(previous, next, "{what} should invalidate the geometry cache");
+            previous = next;
+        };
+
+        viewer
+            .update_positions(&[
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(3.0, 0.0, 0.0),
+            ])
+            .expect("matching atom count");
+        assert_changed(&viewer, "moving atoms");
+
+        viewer.set_molecule_opacity(0.5);
+        assert_changed(&viewer, "changing opacity");
+
+        viewer.set_atom_radii(Some(vec![0.1, 0.2, 0.3]));
+        assert_changed(&viewer, "setting per-atom radii");
+
+        viewer.set_atom_radii(None);
+        assert_changed(&viewer, "clearing per-atom radii");
+
+        viewer.set_atom_colors(Some(vec![[1.0, 0.0, 0.0, 1.0]; 3]));
+        assert_changed(&viewer, "setting per-atom colors");
+
+        viewer.set_color_fn(|_, _| (0.0, 1.0, 0.0, 1.0));
+        assert_changed(&viewer, "changing the color function");
+
+        viewer.mark_changed();
+        assert_changed(&viewer, "an explicit mark_changed");
+    }
+
+    /// Mesh resolution is tracked separately because the LOD worker can change
+    /// it at the top of a render, after the caller assembled the frame.
+    #[test]
+    fn mesh_resolution_and_style_invalidate_the_key() {
+        let mut renderer = OffscreenRenderer::new();
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(molecule_with(3));
+
+        let base = key_for(&renderer, &viewer);
+
+        renderer.set_mesh_resolution(24);
+        assert_ne!(base, key_for(&renderer, &viewer));
+
+        renderer.set_mesh_resolution(16);
+        renderer.set_render_style(RenderStyle::Wireframe);
+        assert_ne!(base, key_for(&renderer, &viewer));
+    }
+
+    /// A frame assembled by hand, without `with_geometry_revision`, must never
+    /// hit the cache -- the renderer has no way to know whether it is stale.
+    #[test]
+    fn a_frame_without_a_declared_revision_never_caches() {
+        let renderer = OffscreenRenderer::new();
+        let molecule = molecule_with(3);
+
+        let build = || {
+            renderer.build_geometry_cache_key(&RenderFrameState::new(
+                Some(&molecule),
+                [0.0; 16],
+                None,
+                1.0,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                default_color_fn,
+                None,
+                RenderStyle::BallStick,
+                16,
+                false,
+                1.0,
+            ))
+        };
+
+        assert_ne!(build(), build());
+    }
 }

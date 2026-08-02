@@ -201,8 +201,9 @@ fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortE
 struct HoverPickKey {
     pointer: [u32; 2],
     view_proj: [u32; 16],
-    molecule_generation: u64,
-    atom_count: usize,
+    /// `MoleculeViewer::revision` — covers replacing the molecule and moving its
+    /// atoms alike.
+    geometry_revision: u64,
 }
 
 pub struct InteractiveMoleculeViewport {
@@ -420,6 +421,7 @@ impl InteractiveMoleculeViewport {
             false,
             self.viewer.molecule_opacity,
         )
+        .with_geometry_revision(self.viewer.revision())
         .with_atom_attrs(
             self.viewer.atom_radii.as_deref(),
             self.viewer.atom_colors.as_deref(),
@@ -497,6 +499,7 @@ impl InteractiveMoleculeViewport {
             self.offscreen.is_low_mode(),
             self.viewer.molecule_opacity,
         )
+        .with_geometry_revision(self.viewer.revision())
         .with_atom_attrs(
             self.viewer.atom_radii.as_deref(),
             self.viewer.atom_colors.as_deref(),
@@ -534,18 +537,7 @@ impl InteractiveMoleculeViewport {
         HoverPickKey {
             pointer: [pointer.x.to_bits(), pointer.y.to_bits()],
             view_proj: view_proj_bits,
-            molecule_generation: self
-                .viewer
-                .molecule
-                .as_ref()
-                .map(|mol| mol.generation())
-                .unwrap_or(0),
-            atom_count: self
-                .viewer
-                .molecule
-                .as_ref()
-                .map(|mol| mol.atoms.len())
-                .unwrap_or(0),
+            geometry_revision: self.viewer.revision(),
         }
     }
 

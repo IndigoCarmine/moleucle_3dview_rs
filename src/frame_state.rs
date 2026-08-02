@@ -6,6 +6,16 @@ use lin_alg::f32::Vec3;
 
 pub struct RenderFrameState<'a> {
     pub molecule: Option<&'a Molecule>,
+    /// Identifies the state of everything the built-in molecule geometry is
+    /// built from — see [`crate::MoleculeViewer::revision`], which is where the
+    /// viewport path gets this value. The renderer keys its geometry cache on
+    /// it: an unchanged revision means the cached vertex/instance buffers still
+    /// describe this frame and no CPU rebuild or GPU upload is needed.
+    ///
+    /// [`RenderFrameState::new`] defaults it to a fresh value every call, so a
+    /// caller assembling frame state by hand always gets a rebuild. Opt into
+    /// caching with [`RenderFrameState::with_geometry_revision`].
+    pub geometry_revision: u64,
     pub view_proj: [f32; 16],
     pub camera_position: Option<Vec3>,
     pub fov_y: f32,
@@ -42,6 +52,16 @@ pub struct RenderFrameState<'a> {
 /// unaffected by `clear_color` being added.
 pub const DEFAULT_CLEAR_COLOR: [f32; 4] = [0.08, 0.10, 0.14, 1.0];
 
+/// A revision value that is never equal to any previously issued one, so the
+/// renderer's geometry cache always misses.
+fn next_uncacheable_revision() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Start above any plausible `MoleculeViewer::revision` so the two counters
+    // cannot collide in a frame that mixes the two sources.
+    static COUNTER: AtomicU64 = AtomicU64::new(1 << 63);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 impl<'a> RenderFrameState<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -61,6 +81,10 @@ impl<'a> RenderFrameState<'a> {
     ) -> Self {
         Self {
             molecule,
+            // No caller-supplied revision means we cannot know whether anything
+            // changed, so assume it did. A fixed default (0) would make a
+            // hand-assembled frame cache-hit forever and never redraw.
+            geometry_revision: next_uncacheable_revision(),
             view_proj,
             camera_position,
             fov_y,
@@ -77,6 +101,18 @@ impl<'a> RenderFrameState<'a> {
             atom_colors: None,
             clear_color: DEFAULT_CLEAR_COLOR,
         }
+    }
+
+    /// Opt this frame into the renderer's geometry cache by declaring which
+    /// version of the geometry inputs it describes — normally
+    /// [`crate::MoleculeViewer::revision`].
+    ///
+    /// Passing a revision that does not change when the molecule, its
+    /// positions, its colors or its per-atom overrides change will leave stale
+    /// geometry on screen.
+    pub fn with_geometry_revision(mut self, geometry_revision: u64) -> Self {
+        self.geometry_revision = geometry_revision;
+        self
     }
 
     /// Attach optional per-atom radius / color overrides (see the field docs).

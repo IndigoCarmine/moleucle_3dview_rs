@@ -1,10 +1,8 @@
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
-use crate::frame_state::RenderFrameState;
 use crate::molecule::{Atom, Molecule};
-use crate::scene_types::{Entity, Mesh, Scene};
 use crate::AdditionalRender;
 // Viewer no longer owns shared state; state is passed in by the caller (viewport or user).
-use lin_alg::f32::{Quaternion, Vec3};
+use lin_alg::f32::Vec3;
 
 #[derive(Debug, Clone)]
 pub enum ViewerEvent {
@@ -41,7 +39,9 @@ pub fn default_color_fn(atom: &Atom, _is_selected: bool) -> (f32, f32, f32, f32)
 
 pub struct MoleculeViewer {
     pub molecule: Option<Molecule>,
-    pub dirty: bool,
+    /// Bumped by every mutator that changes what the built-in molecule
+    /// rendering would produce. See [`MoleculeViewer::revision`].
+    revision: u64,
     pub additional_render: Vec<Box<dyn AdditionalRender>>,
     pub color_fn: ColorFn,
     /// Opacity of the whole molecule (atoms + bonds) in `0.0..=1.0`, folded into
@@ -60,7 +60,7 @@ impl MoleculeViewer {
     pub fn new() -> Self {
         Self {
             molecule: None,
-            dirty: false,
+            revision: 0,
             additional_render: Vec::new(),
             color_fn: default_color_fn,
             molecule_opacity: 1.0,
@@ -73,7 +73,7 @@ impl MoleculeViewer {
     pub fn with_color_fn(color_fn: ColorFn) -> Self {
         Self {
             molecule: None,
-            dirty: false,
+            revision: 0,
             additional_render: Vec::new(),
             color_fn,
             molecule_opacity: 1.0,
@@ -82,35 +82,62 @@ impl MoleculeViewer {
         }
     }
 
+    /// A counter that changes whenever anything the built-in molecule geometry
+    /// is built from changes: the molecule itself, its positions, the color
+    /// function, the whole-molecule opacity, or the per-atom radius / color
+    /// overrides.
+    ///
+    /// The renderer keys its geometry cache on this, so it is the single answer
+    /// to "does the cached geometry still describe this viewer?". Callers
+    /// mutating the molecule through [`Self::molecule`] directly — the field is
+    /// public — must call [`Self::mark_changed`] afterwards, or the renderer
+    /// will keep drawing the previous geometry.
+    #[inline]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Declare that the molecule was mutated behind the viewer's back, through
+    /// the public [`Self::molecule`] field.
+    #[inline]
+    pub fn mark_changed(&mut self) {
+        self.bump_revision();
+    }
+
+    #[inline]
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// Set the color function
     pub fn set_color_fn(&mut self, color_fn: ColorFn) {
         self.color_fn = color_fn;
-        self.dirty = true;
+        self.bump_revision();
     }
 
     /// Set the whole-molecule opacity (clamped to `0.0..=1.0`). `1.0` is opaque.
     pub fn set_molecule_opacity(&mut self, opacity: f32) {
         self.molecule_opacity = opacity.clamp(0.0, 1.0);
-        self.dirty = true;
+        self.bump_revision();
     }
 
     /// Set (or clear) the per-atom radius override used by the built-in molecule
     /// rendering. Pass `None` to fall back to element-derived radii.
     pub fn set_atom_radii(&mut self, radii: Option<Vec<f32>>) {
         self.atom_radii = radii;
-        self.dirty = true;
+        self.bump_revision();
     }
 
     /// Set (or clear) the per-atom RGBA color override used by the built-in
     /// molecule rendering. Pass `None` to fall back to `color_fn`.
     pub fn set_atom_colors(&mut self, colors: Option<Vec<[f32; 4]>>) {
         self.atom_colors = colors;
-        self.dirty = true;
+        self.bump_revision();
     }
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
         self.molecule = Some(molecule);
-        self.dirty = true;
+        self.bump_revision();
     }
 
     /// Update the loaded molecule's atom positions in place for trajectory
@@ -124,7 +151,7 @@ impl MoleculeViewer {
             .as_mut()
             .ok_or_else(|| "no molecule loaded".to_string())?;
         mol.set_positions(positions)?;
-        self.dirty = true;
+        self.bump_revision();
         Ok(())
     }
 
@@ -136,20 +163,19 @@ impl MoleculeViewer {
             .as_mut()
             .ok_or_else(|| "no molecule loaded".to_string())?;
         mol.set_positions_angstrom(coords)?;
-        self.dirty = true;
+        self.bump_revision();
         Ok(())
     }
 
     pub fn add_additional_render<R: AdditionalRender + 'static>(&mut self, render: R) {
-        // keep the render's ownership and mark dirty
         self.additional_render.push(Box::new(render));
-        self.dirty = true;
+        self.bump_revision();
     }
 
     /// Add a boxed `AdditionalRender` directly.
     pub fn add_additional_render_box(&mut self, render: Box<dyn AdditionalRender>) {
         self.additional_render.push(render);
-        self.dirty = true;
+        self.bump_revision();
     }
 
     pub fn pick(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<ViewerEvent> {
@@ -246,142 +272,4 @@ impl MoleculeViewer {
         None
     }
 
-    /// Updates the graphics scene based on the current molecule data.
-    ///
-    /// `states` is a map of per-renderer states supplied by the caller (e.g., the viewport).
-    pub fn update_scene(&mut self, scene: &mut Scene, frame: &RenderFrameState<'_>) {
-        if !self.dirty {
-            return;
-        }
-        self.dirty = false;
-
-        if let Some(mol) = &self.molecule {
-            scene.meshes.clear();
-            scene.entities.clear();
-
-            // 1. Create Meshes
-            // Sphere for atoms (Radius 1.0, but we scale it)
-            // 3 subdivisions gives a decent sphere.
-            let sphere_mesh = Mesh::new_sphere(1.0, 3);
-            let sphere_idx = scene.meshes.len();
-            scene.meshes.push(sphere_mesh);
-
-            // Cylinder for bonds (Length 1.0, Radius 1.0, along Y)
-            // 10 sides is enough for thin bonds
-            let cyl_mesh = Mesh::new_cylinder(1.0, 1.0, 10);
-            let cyl_idx = scene.meshes.len();
-            scene.meshes.push(cyl_mesh);
-
-            // 2. Create Entities
-            // Atoms
-            for atom in &mol.atoms {
-                // Convert atom position to graphics Vec3.
-                let pos = Vec3::new(atom.position.x, atom.position.y, atom.position.z);
-
-                // Use custom color function
-                let color = (self.color_fn)(atom, false);
-
-                let radius = ball_stick_radius(&atom.element, false);
-
-                scene.entities.push(Entity::new(
-                    sphere_idx,
-                    pos,
-                    Quaternion::new_identity(),
-                    radius, // Uniform scale
-                    color,
-                    0.2, // Low shininess
-                ));
-            }
-
-            // Bonds
-            for bond in &mol.bonds {
-                let a = mol.atoms[bond.atom_a].position;
-                let b = mol.atoms[bond.atom_b].position;
-
-                let p1 = Vec3::new(a.x, a.y, a.z);
-                let p2 = Vec3::new(b.x, b.y, b.z);
-
-                let diff = p2 - p1;
-                let len = diff.magnitude();
-
-                // If atoms are overlapping, skip bond
-                if len < 0.001 {
-                    continue;
-                }
-
-                let mid = (p1 + p2) * 0.5;
-
-                // Orientation: Rotate Y-up cylinder to match `diff` direction
-                let dir = diff.to_normalized();
-                let up = Vec3::new(0.0, 1.0, 0.0);
-
-                // Calculate rotation from UP to DIR
-                // Quaternion from cross product?
-                // Let's rely on standard way:
-                // axis = cross(u, v)
-                // angle = acos(dot(u, v))
-                // but we need to handle parallel case.
-
-                let orientation = Quaternion::from_unit_vecs(up, dir);
-
-                let bond_radius = default_ball_stick_bond_radius();
-                let scale_partial = Vec3::new(bond_radius, len, bond_radius);
-
-                let mut entity = Entity::new(
-                    cyl_idx,
-                    mid,
-                    orientation,
-                    1.0,                  // Base scale, overridden by partial
-                    (0.5, 0.5, 0.5, 1.0), // Grey bonds
-                    0.1,
-                );
-                entity.scale_partial = Some(scale_partial);
-                scene.entities.push(entity);
-            }
-
-            // draw xyz axes for debugging
-            let axis_len = 2.0;
-            let axis_radius = 0.05;
-
-            // X axis Color Red
-            let mut x_axis = Entity::new(
-                cyl_idx,
-                Vec3::new(axis_len / 2.0, 0.0, 0.0),
-                Quaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), -std::f32::consts::FRAC_PI_2),
-                1.0,
-                (1.0, 0.0, 0.0, 1.0),
-                0.1,
-            );
-            x_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
-            scene.entities.push(x_axis);
-
-            // Y axis Color Green
-            let mut y_axis = Entity::new(
-                cyl_idx,
-                Vec3::new(0.0, axis_len / 2.0, 0.0),
-                Quaternion::new_identity(),
-                1.0,
-                (0.0, 1.0, 0.0, 1.0),
-                0.1,
-            );
-            y_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
-            scene.entities.push(y_axis);
-
-            // Z axis   Color Blue
-            let mut z_axis = Entity::new(
-                cyl_idx,
-                Vec3::new(0.0, 0.0, axis_len / 2.0),
-                Quaternion::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
-                1.0,
-                (0.0, 0.0, 1.0, 1.0),
-                0.1,
-            );
-            z_axis.scale_partial = Some(Vec3::new(axis_radius, axis_len, axis_radius));
-            scene.entities.push(z_axis);
-
-            for render in &self.additional_render {
-                render.update_scene(scene, frame);
-            }
-        }
-    }
 }
