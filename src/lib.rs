@@ -22,7 +22,7 @@
 //! # use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, SelectedAtomRender};
 //! # use std::path::Path;
 //! # fn demo(ui: &mut egui::Ui, render_state: &egui_wgpu::RenderState) -> Result<(), String> {
-//! let mut viewport = InteractiveMoleculeViewport::new(None);
+//! let mut viewport = InteractiveMoleculeViewport::new();
 //! viewport.add_additional_render_box(Box::new(SelectedAtomRender::new()));
 //!
 //! let molecule = Molecule::load(Path::new("Benzene.mol2"))?;

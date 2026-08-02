@@ -1,18 +1,25 @@
-use crate::overlays::{SelectedAtomRender, SelectedAtomRenderState};
 use crate::frame_state::RenderFrameState;
+use crate::overlays::{SelectedAtomRender, SelectedAtomRenderState};
 
-use crate::render_state::{
-    get_state_clone_by_type, new_shared_states, set_state_by_type, SharedRenderStates,
-};
+use crate::render_state::{new_shared_states, set_state_by_type, SharedRenderStates};
 use crate::{
     camera, offscreen_renderer::LodSettings, Camera, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle,
 };
-use lin_alg::f32::{Mat4, Vec3};
 use eframe::egui::{self, PointerButton, Sense};
+use lin_alg::f32::{Mat4, Vec3};
+
+/// Something the user did to the view, drained by the host with
+/// [`InteractiveMoleculeViewport::take_events`].
+///
+/// Only edges are events. Hovering is a *level* — "which atom is under the
+/// pointer right now" — and is read with
+/// [`InteractiveMoleculeViewport::hovered_atom`] instead, so a host cannot end
+/// up showing a stale hover just because nothing new happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewPortEvent {
-    hovered { atom: usize },
-    clicked { atom: usize },
+    /// The atom was clicked. Every click is queued, in order.
+    Clicked { atom: usize },
 }
 
 /// What to render for an off-screen image export.
@@ -168,28 +175,6 @@ fn unpremultiply(rgba: &mut [u8]) {
     }
 }
 
-fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortEvent) {
-    if let ViewPortEvent::clicked { atom } = event {
-        // toggle atom selection in state
-        let mut selected: SelectedAtomRenderState =
-            get_state_clone_by_type::<SelectedAtomRenderState>(&viewport.shared_states)
-                .unwrap_or_else(|| SelectedAtomRenderState {
-                    selected_atoms: Vec::new(),
-                    color: [1.0, 0.0, 0.0, 1.0],
-                });
-        if let Some(_) = selected
-            .selected_atoms
-            .iter()
-            .position(|&index| index == atom)
-        {
-            selected.remove_atom(atom);
-        } else {
-            selected.toggle_atom(atom);
-        }
-        set_state_by_type(&viewport.shared_states, selected);
-    }
-}
-
 /// The camera a fresh viewport starts with.
 ///
 /// The aspect ratio is only a placeholder — `show()` sets the real one from the
@@ -223,17 +208,19 @@ pub struct InteractiveMoleculeViewport {
     camera: camera::OrbitalCamera,
     offscreen: OffscreenRenderer,
     shared_states: SharedRenderStates,
-    on_event: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent)>,
+    /// Events raised during [`Self::show`], waiting to be drained by the host.
+    events: Vec<ViewPortEvent>,
+    /// Atom under the pointer as of the last [`Self::show`], or `None` when the
+    /// pointer is off the view or over empty space.
+    hovered_atom: Option<usize>,
     /// The last hover pick and the inputs it was computed from, so a stationary
     /// pointer over a still scene reuses the answer instead of re-running the
-    /// ray test. The event still fires every frame — only the scan is skipped.
+    /// ray test.
     last_hover_pick: Option<(HoverPickKey, Option<usize>)>,
 }
 
 impl InteractiveMoleculeViewport {
-    pub fn new(
-        on_event: Option<Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent)>>,
-    ) -> Self {
+    pub fn new() -> Self {
         let viewer = MoleculeViewer::new();
         let shared_states = new_shared_states();
         let mut offscreen = OffscreenRenderer::new();
@@ -244,7 +231,8 @@ impl InteractiveMoleculeViewport {
             camera: default_camera(),
             offscreen,
             shared_states,
-            on_event: on_event.unwrap_or_else(|| Box::new(on_event_default)),
+            events: Vec::new(),
+            hovered_atom: None,
             last_hover_pick: None,
         }
     }
@@ -269,17 +257,46 @@ impl InteractiveMoleculeViewport {
         self.viewer.update_positions_angstrom(coords)
     }
 
-    pub fn register_event_handler(
-        &mut self,
-        handler: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent) + 'static>,
-    ) {
-        self.on_event = handler;
+    /// Take the events raised since the last call, oldest first.
+    ///
+    /// Events are queued during [`Self::show`], so drain them *after* calling it
+    /// to react on the same frame.
+    ///
+    /// ```no_run
+    /// # use moleucle_3dview_rs::{InteractiveMoleculeViewport, ViewPortEvent};
+    /// # fn demo(vp: &mut InteractiveMoleculeViewport, ui: &mut egui::Ui,
+    /// #         rs: &egui_wgpu::RenderState) -> Result<(), String> {
+    /// vp.show(ui, rs)?;
+    /// for event in vp.take_events() {
+    ///     match event {
+    ///         ViewPortEvent::Clicked { atom } => println!("clicked {atom}"),
+    ///     }
+    /// }
+    /// if let Some(atom) = vp.hovered_atom() {
+    ///     println!("hovering {atom}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn take_events(&mut self) -> Vec<ViewPortEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// The atom under the pointer as of the last [`Self::show`], or `None` when
+    /// the pointer is off the view or over empty space.
+    ///
+    /// This is state, not an event: read it every frame and it is always
+    /// current, including when the pointer moves off a molecule.
+    pub fn hovered_atom(&self) -> Option<usize> {
+        self.hovered_atom
     }
 
     pub fn selected_atoms(&self) -> Vec<usize> {
-        get_state_clone_by_type::<SelectedAtomRenderState>(&self.shared_states)
-            .map(|state| state.selected_atoms)
-            .unwrap_or_default()
+        crate::render_state::with_state_by_type::<SelectedAtomRenderState, _>(
+            &self.shared_states,
+            |state| state.selected_atoms.clone(),
+        )
+        .unwrap_or_default()
     }
     pub fn focus_on_molecule_center(&mut self) {
         if let Some(molecule) = self.viewer.molecule.as_ref() {
@@ -553,6 +570,10 @@ impl InteractiveMoleculeViewport {
     }
 
     fn handle_interaction(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        // Recomputed below whenever the pointer is over the view; leaving the
+        // view therefore clears it.
+        self.hovered_atom = None;
+
         if response.hovered() {
             if let Some(pointer) = response.hover_pos() {
                 // Reuse the previous answer while nothing that could change it
@@ -581,11 +602,7 @@ impl InteractiveMoleculeViewport {
                     }
                 };
 
-                if let Some(i) = picked {
-                    let on_event = std::mem::replace(&mut self.on_event, Box::new(|_, _| {}));
-                    on_event(self, ViewPortEvent::hovered { atom: i });
-                    self.on_event = on_event;
-                }
+                self.hovered_atom = picked;
             }
 
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
@@ -625,12 +642,10 @@ impl InteractiveMoleculeViewport {
                     response.rect.height().max(1.0),
                 );
 
-                if let Some(crate::viewer::ViewerEvent::AtomClicked(i)) =
+                if let Some(crate::viewer::ViewerEvent::AtomClicked(atom)) =
                     self.viewer.pick(ray_origin, ray_dir)
                 {
-                    let on_event = std::mem::replace(&mut self.on_event, Box::new(|_, _| {}));
-                    on_event(self, ViewPortEvent::clicked { atom: i });
-                    self.on_event = on_event;
+                    self.events.push(ViewPortEvent::Clicked { atom });
                 }
             }
         }
@@ -639,7 +654,7 @@ impl InteractiveMoleculeViewport {
 
 impl Default for InteractiveMoleculeViewport {
     fn default() -> Self {
-        Self::new(None)
+        Self::new()
     }
 }
 

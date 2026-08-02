@@ -8,15 +8,13 @@ use moleucle_3dview_rs::{default_color_fn, AdditionalRender, Scene};
 use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, RenderStyle, ViewPortEvent};
 use std::path::Path;
 
-use std::cell::RefCell;
-use std::rc::Rc;
 
 struct SimpleViewerApp {
     viewport: InteractiveMoleculeViewport,
     render_state: Option<egui_wgpu::RenderState>,
     startup_error: Option<String>,
-    hovered_atom: Rc<RefCell<usize>>,
-    selected_atoms: Rc<RefCell<Vec<usize>>>,
+    hovered_atom: Option<usize>,
+    selected_atoms: Vec<usize>,
     /// Per-atom colors from `default_color_fn`, kept so the per-atom alpha test
     /// can re-tint them without losing element coloring.
     base_atom_colors: Vec<[f32; 4]>,
@@ -149,31 +147,28 @@ impl AdditionalRender for TransparencyProbeRender {
 }
 
 impl SimpleViewerApp {
-    fn on_event(
-        selected_atoms: Rc<RefCell<Vec<usize>>>,
-        hovered_atom: Rc<RefCell<usize>>,
-        viewport: &mut InteractiveMoleculeViewport,
-        event: ViewPortEvent,
-    ) {
-        if let ViewPortEvent::clicked { atom } = event {
-            // toggle atom selection in state
-            let mut selected = selected_atoms.borrow_mut();
-            if let Some(pos) = selected.iter().position(|&index| index == atom) {
-                selected.remove(pos);
-            } else {
-                selected.push(atom);
+    /// Drain the viewport's events. Called right after `show`, so a click is
+    /// reflected on the same frame it happened.
+    fn handle_events(&mut self) {
+        self.hovered_atom = self.viewport.hovered_atom();
+        for event in self.viewport.take_events() {
+            match event {
+                ViewPortEvent::Clicked { atom } => {
+                    if let Some(pos) = self.selected_atoms.iter().position(|&i| i == atom) {
+                        self.selected_atoms.remove(pos);
+                    } else {
+                        self.selected_atoms.push(atom);
+                    }
+                    self.viewport.set_state_by_type(SelectedAtomRenderState {
+                        selected_atoms: self.selected_atoms.clone(),
+                        color: [1.0, 0.0, 0.0, 1.0],
+                    });
+                }
             }
-            viewport.set_state_by_type(SelectedAtomRenderState {
-                selected_atoms: selected.clone(),
-                color: [1.0, 0.0, 0.0, 1.0],
-            });
-        }
-        if let ViewPortEvent::hovered { atom } = event {
-            *hovered_atom.borrow_mut() = atom;
         }
     }
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut viewport = InteractiveMoleculeViewport::new(None);
+        let mut viewport = InteractiveMoleculeViewport::new();
         // register an example per-render state renderer
         let example = ExampleStateRender::new();
         viewport.add_additional_render_box(Box::new(example));
@@ -216,8 +211,8 @@ impl SimpleViewerApp {
             viewport,
             render_state: cc.wgpu_render_state.clone(),
             startup_error,
-            hovered_atom: Rc::new(RefCell::new(0)),
-            selected_atoms: Rc::new(RefCell::new(Vec::new())),
+            hovered_atom: None,
+            selected_atoms: Vec::new(),
             base_atom_colors,
             atom_alpha_enabled: false,
             atom_alpha: 0.35,
@@ -285,21 +280,6 @@ impl SimpleViewerApp {
         );
     }
 
-    fn register_event_handler(mut self) -> Self {
-        let selected_atoms = Rc::clone(&self.selected_atoms);
-        let hovered_atom = Rc::clone(&self.hovered_atom);
-
-        self.viewport
-            .register_event_handler(Box::new(move |viewport, event| {
-                SimpleViewerApp::on_event(
-                    Rc::clone(&selected_atoms),
-                    Rc::clone(&hovered_atom),
-                    viewport,
-                    event,
-                )
-            }));
-        self
-    }
 }
 
 fn load_default_molecule() -> Result<Molecule, String> {
@@ -393,7 +373,10 @@ impl eframe::App for SimpleViewerApp {
             }
         });
         egui::Panel::bottom("footer").show(ui, |ui| {
-            ui.label("Hovered atom: ".to_string() + &self.hovered_atom.borrow().to_string());
+            ui.label(match self.hovered_atom {
+                Some(atom) => format!("Hovered atom: {atom}"),
+                None => "Hovered atom: -".to_string(),
+            });
             ui.separator();
             ui.heading("Transparency / depth-write test");
             self.transparency_controls(ui);
@@ -412,6 +395,7 @@ impl eframe::App for SimpleViewerApp {
                     format!("Offscreen render failed: {err}"),
                 );
             }
+            self.handle_events();
         });
     }
 
@@ -435,7 +419,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let app = SimpleViewerApp::new(cc);
-            Ok(Box::new(app.register_event_handler()))
+            Ok(Box::new(app))
         }),
     )
 }

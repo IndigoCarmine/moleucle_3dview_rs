@@ -53,7 +53,7 @@ struct App {
 
 impl App {
     fn new(path: &Path) -> Result<Self, String> {
-        let mut viewport = InteractiveMoleculeViewport::new(None);
+        let mut viewport = InteractiveMoleculeViewport::new();
         viewport.add_additional_render_box(Box::new(SelectedAtomRender::new()));
 
         viewport.set_molecule(Molecule::load(path)?);
