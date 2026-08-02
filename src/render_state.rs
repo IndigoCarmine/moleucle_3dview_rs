@@ -16,7 +16,34 @@ pub fn set_state_by_type<T: Any + Send + Sync>(states: &SharedRenderStates, valu
     }
 }
 
+/// Borrow the value stored for `T` and run `f` on it, returning `f`'s result, or
+/// `None` if no `T` is stored.
+///
+/// Prefer this to [`get_state_clone_by_type`] on the render path: overlays read
+/// their state once per frame, and cloning a state that holds a `Vec` of atom
+/// indices or positions means copying the whole thing every frame.
+///
+/// # Deadlock
+///
+/// `f` runs while the map's lock is held, and the lock is not reentrant, so `f`
+/// must not touch `states` again — no nested `with_state_by_type`, no
+/// `get_state_clone_by_type`, no `set_state_by_type`. Reading two state types in
+/// one overlay means two *sequential* calls, not nested ones. Calling
+/// [`crate::AdditionalRender`] helpers from inside `f` is fine: they only touch
+/// the scene.
+pub fn with_state_by_type<T: Any + Send + Sync, R>(
+    states: &SharedRenderStates,
+    f: impl FnOnce(&T) -> R,
+) -> Option<R> {
+    let map = states.lock().ok()?;
+    let value = map.get(&TypeId::of::<T>())?.downcast_ref::<T>()?;
+    Some(f(value))
+}
+
 /// Get a cloned value from the map by type.
+///
+/// Useful when the caller needs to own the value, or to hold it past the lock.
+/// On the per-frame render path prefer [`with_state_by_type`], which borrows.
 pub fn get_state_clone_by_type<T: Any + Send + Sync + Clone>(
     states: &SharedRenderStates,
 ) -> Option<T> {

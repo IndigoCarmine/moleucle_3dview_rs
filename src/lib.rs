@@ -72,8 +72,8 @@ pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
 pub use molecule::{Atom, AtomMeta, AtomRecord, Bond, Element, Molecule};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};
 pub use render_state::{
-    get_state_clone_by_type, new_shared_states, set_state_by_type, with_state_mut_by_type,
-    SharedRenderStates,
+    get_state_clone_by_type, new_shared_states, set_state_by_type, with_state_by_type,
+    with_state_mut_by_type, SharedRenderStates,
 };
 pub use scene_types::{Entity, Mesh, Scene};
 pub use viewer::{default_color_fn, ColorFn, MoleculeViewer};

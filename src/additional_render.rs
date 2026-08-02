@@ -1,7 +1,7 @@
 use crate::atom_radii::vdw_radius;
 use crate::frame_state::RenderFrameState;
 use crate::offscreen_renderer::RenderStyle;
-use crate::render_state::get_state_clone_by_type;
+use crate::render_state::with_state_by_type;
 use crate::scene_types::{Entity, Scene, SphereImpostorInstance};
 use lin_alg::f32::Quaternion;
 use lin_alg::f32::Vec3;
@@ -126,33 +126,28 @@ impl AdditionalRender for SelectedAtomRender {
             return;
         };
 
-        // Use type-keyed state to lookup selected atoms. If not set, fall back to internal list.
-        let source: SelectedAtomRenderState =
-            get_state_clone_by_type::<SelectedAtomRenderState>(states).unwrap_or_else(|| {
-                SelectedAtomRenderState {
-                    selected_atoms: Vec::new(),
-                    color: [1.0, 0.0, 0.0, 1.0], // Default red color
+        // Borrow the selection rather than cloning it: this runs once per frame
+        // and the list is as long as the user's selection.
+        with_state_by_type::<SelectedAtomRenderState, ()>(states, |source| {
+            let color = (
+                source.color[0],
+                source.color[1],
+                source.color[2],
+                source.color[3],
+            );
+            scene.entities.reserve(source.selected_atoms.len());
+            for atom_idx in &source.selected_atoms {
+                if let Some(atom) = molecule.atoms.get(*atom_idx) {
+                    self.add_sphere(
+                        scene,
+                        frame,
+                        atom.position,
+                        vdw_radius(&atom.element) * 0.4,
+                        color,
+                    );
                 }
-            });
-
-        let color = (
-            source.color[0],
-            source.color[1],
-            source.color[2],
-            source.color[3],
-        );
-        scene.entities.reserve(source.selected_atoms.len());
-        for atom_idx in &source.selected_atoms {
-            if let Some(atom) = molecule.atoms.get(*atom_idx) {
-                self.add_sphere(
-                    scene,
-                    frame,
-                    atom.position,
-                    vdw_radius(&atom.element) * 0.4,
-                    color,
-                );
             }
-        }
+        });
     }
 }
 
@@ -233,21 +228,24 @@ impl AdditionalRender for DebugRender {
             return;
         };
 
-        let state = get_state_clone_by_type::<DebugRenderState>(states).unwrap_or_else(|| {
-            DebugRenderState::new((
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0), // Default ray along +X axis
-            ))
+        // `DebugRenderState` is all `Copy` scalars, so take a snapshot and let
+        // the lock go before touching the scene.
+        let state = with_state_by_type::<DebugRenderState, _>(states, |state| {
+            (state.ray, state.ray_length, state.ray_color)
         });
+        let Some((ray, ray_length, ray_color)) = state else {
+            return;
+        };
+
         // Draw debug ray as a thin cylinder
-        let (origin, direction) = state.ray;
+        let (origin, direction) = ray;
 
         // Normalize direction
         let normalized_dir = direction.to_normalized();
         let ray_radius = 0.05; // Thin cylinder for visualization
 
         // Calculate midpoint of the ray
-        let ray_end = origin + normalized_dir * state.ray_length;
+        let ray_end = origin + normalized_dir * ray_length;
         let midpoint = (origin + ray_end) * 0.5;
 
         let ray_idx = scene.unit_cylinder_mesh(8);
@@ -257,11 +255,11 @@ impl AdditionalRender for DebugRender {
         let orientation = Quaternion::from_unit_vecs(up, normalized_dir);
 
         // Create entity with proper scaling
-        let mut ray_entity = Entity::new(ray_idx, midpoint, orientation, 1.0, state.ray_color, 0.1);
+        let mut ray_entity = Entity::new(ray_idx, midpoint, orientation, 1.0, ray_color, 0.1);
 
         // Apply scale_partial to set cylinder dimensions
         // X and Z are radii, Y is length
-        ray_entity.scale_partial = Some(Vec3::new(ray_radius, state.ray_length, ray_radius));
+        ray_entity.scale_partial = Some(Vec3::new(ray_radius, ray_length, ray_radius));
         scene.entities.push(ray_entity);
     }
 }
