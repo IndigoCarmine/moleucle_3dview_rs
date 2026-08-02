@@ -60,10 +60,10 @@ fn test_mol2_atom_data() {
 
     let first_atom = &mol.atoms[0];
     assert!(!first_atom.element.is_empty(), "Atom should have element symbol");
-    assert!(
-        first_atom.id > 0 || first_atom.id == 0,
-        "Atom should have valid id"
-    );
+    // `id` is the atom's own 0-based index, the same in every loader.
+    for (index, atom) in mol.atoms.iter().enumerate() {
+        assert_eq!(atom.id, index, "atom ids should be 0-based indices");
+    }
 
     // Position should be valid numbers (not NaN, not infinity)
     assert!(first_atom.position.x.is_finite(), "X coordinate should be finite");
@@ -91,7 +91,7 @@ fn test_mol2_element_symbols() {
     // Should not have other elements
     for elem in &elements {
         assert!(
-            elem == &"C" || elem == &"H",
+            elem == "C" || elem == "H",
             "Benzene should only have C and H, found: {}",
             elem
         );

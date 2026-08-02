@@ -69,6 +69,12 @@ pub struct MoleculeViewer {
     pick_grid: Mutex<Option<(u64, Arc<SpatialGrid>)>>,
 }
 
+impl Default for MoleculeViewer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MoleculeViewer {
     pub fn new() -> Self {
         Self {

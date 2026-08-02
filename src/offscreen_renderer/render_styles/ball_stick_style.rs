@@ -309,7 +309,7 @@ mod tests {
         mask[1] = false;
         assert_eq!(
             vertex_count(&molecule, Some(&mask)),
-            3 * per_atom + 1 * per_bond,
+            3 * per_atom + per_bond,
         );
 
         // Hide an end atom: only its single bond goes.

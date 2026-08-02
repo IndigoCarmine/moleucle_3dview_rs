@@ -14,6 +14,12 @@ pub struct SelectedAtomRenderState {
 }
 pub struct SelectedAtomRender {}
 
+impl Default for SelectedAtomRender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SelectedAtomRender {
     pub fn new() -> Self {
         Self {}

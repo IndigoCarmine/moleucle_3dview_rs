@@ -447,7 +447,11 @@ impl Molecule {
                                     z * ANGSTROM_TO_NANOMETER,
                                 ),
                                 element: Element::new(&element),
-                                id: atoms.len() + 1,
+                                // 0-based, matching the PDB and GRO loaders and
+                                // the atom's own index in `atoms`. MOL2 numbers
+                                // atoms from 1 in the file; that stays in the
+                                // file.
+                                id: atoms.len(),
                                 meta: None,
                             });
                         }
@@ -500,8 +504,7 @@ impl Molecule {
         // rather than cloned into a second vector; no intermediate
         // Vec<AtomRecord> is kept alive, halving peak memory for large files.
         let mut atoms: Vec<Atom> = Vec::new();
-        let mut conect_bonds = Vec::new();
-        conect_bonds.reserve(256);
+        let mut conect_bonds = Vec::with_capacity(256);
 
         // PDB is a fixed-column format, so every field here is a byte range.
         // Slice with `get`, never `[..]`: a stray non-ASCII byte anywhere in
@@ -546,8 +549,7 @@ impl Molecule {
 
         // Use explicit bonds if available, otherwise infer from distances
         let bonds = if !conect_bonds.is_empty() {
-            let mut result = Vec::new();
-            result.reserve(conect_bonds.len());
+            let mut result = Vec::with_capacity(conect_bonds.len());
             for (a, b) in conect_bonds {
                 if a < atoms.len() && b < atoms.len() {
                     result.push(Bond {

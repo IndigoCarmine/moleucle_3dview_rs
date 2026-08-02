@@ -136,13 +136,13 @@ fn box_filter_premultiplied(
                     let sx = ox * factor + dx;
                     let sy = oy * factor + dy;
                     let i = ((sy * width + sx) * 4) as usize;
-                    for c in 0..4 {
-                        acc[c] += src[i + c] as f32;
+                    for (channel, sample) in acc.iter_mut().zip(&src[i..i + 4]) {
+                        *channel += *sample as f32;
                     }
                 }
             }
-            for c in 0..4 {
-                out.push((acc[c] / samples).round().clamp(0.0, 255.0) as u8);
+            for channel in acc {
+                out.push((channel / samples).round().clamp(0.0, 255.0) as u8);
             }
         }
     }
@@ -168,9 +168,9 @@ fn unpremultiply(rgba: &mut [u8]) {
         if a == 0 || a == 255 {
             continue;
         }
-        for c in 0..3 {
-            let straight = (px[c] as f32) * 255.0 / (a as f32);
-            px[c] = straight.round().clamp(0.0, 255.0) as u8;
+        for channel in px.iter_mut().take(3) {
+            let straight = (*channel as f32) * 255.0 / (a as f32);
+            *channel = straight.round().clamp(0.0, 255.0) as u8;
         }
     }
 }
@@ -318,7 +318,7 @@ impl InteractiveMoleculeViewport {
         let mut count = 0usize;
         for (index, atom) in molecule.atoms.iter().enumerate() {
             if self.viewer.is_atom_visible(index) {
-                sum = sum + atom.position;
+                sum += atom.position;
                 count += 1;
             }
         }

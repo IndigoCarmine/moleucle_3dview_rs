@@ -88,7 +88,7 @@ fn test_atom_extended_structure() {
     let atom = &mol.atoms[0];
 
     // Verify all extended fields exist
-    assert!(atom.element.len() > 0, "Element should not be empty");
+    assert!(!atom.element.is_empty(), "Element should not be empty");
     assert!(atom.position.x.is_finite());
     
     // Extended fields

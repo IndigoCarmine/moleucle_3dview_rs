@@ -65,9 +65,7 @@ pub fn with_state_mut_by_type<T: Any + Send + Sync>(
 ) {
     if let Ok(mut map) = states.lock() {
         let key = TypeId::of::<T>();
-        if !map.contains_key(&key) {
-            map.insert(key, Box::new(init));
-        }
+        map.entry(key).or_insert_with(|| Box::new(init));
 
         if let Some(boxed) = map.get_mut(&key) {
             if let Some(val) = boxed.downcast_mut::<T>() {
