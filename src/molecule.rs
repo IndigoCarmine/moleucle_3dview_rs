@@ -16,8 +16,13 @@ pub struct Element {
 }
 
 impl Element {
+    /// Build an element from a symbol, trimming surrounding whitespace.
+    ///
+    /// Trimming here rather than at each call site keeps the 3-byte budget for
+    /// the symbol itself — fixed-column formats pad their element field, and
+    /// `" C "` would otherwise fill the whole buffer with one useful character.
     pub fn new(symbol: &str) -> Self {
-        let src = symbol.as_bytes();
+        let src = symbol.trim().as_bytes();
         let len = src.len().min(3);
         let mut bytes = [0u8; 3];
         bytes[..len].copy_from_slice(&src[..len]);
@@ -326,9 +331,35 @@ impl Molecule {
         }
         Self::from_atoms_bonds(atoms, bonds)
     }
-}
 
-impl Molecule {
+    /// Resolve a bond's endpoint positions, or `None` if either index is out of
+    /// range.
+    ///
+    /// `atoms` and `bonds` are public fields, and callers routinely assemble a
+    /// molecule from a topology file and a coordinate file that disagree on the
+    /// atom count — so a bond pointing past the atom list is a normal input, not
+    /// a caller bug. Every render and picking loop goes through here so that
+    /// case degrades to a missing stick instead of panicking mid-repaint.
+    #[inline]
+    pub fn bond_endpoints(&self, bond: &Bond) -> Option<(Vec3, Vec3)> {
+        let a = self.atoms.get(bond.atom_a)?.position;
+        let b = self.atoms.get(bond.atom_b)?.position;
+        Some((a, b))
+    }
+
+    /// Report the bonds whose endpoints are out of range, as `(index, bond)`.
+    ///
+    /// Rendering and picking already skip these ([`Self::bond_endpoints`]), so
+    /// this is for callers that want to *tell the user* their topology and
+    /// coordinates disagree rather than silently dropping the connectivity.
+    pub fn invalid_bonds(&self) -> impl Iterator<Item = (usize, &Bond)> {
+        let atom_count = self.atoms.len();
+        self.bonds
+            .iter()
+            .enumerate()
+            .filter(move |(_, bond)| bond.atom_a >= atom_count || bond.atom_b >= atom_count)
+    }
+
     pub fn center(&self) -> Vec3 {
         if self.atoms.is_empty() {
             return Vec3::new_zero();
@@ -461,33 +492,40 @@ impl Molecule {
         let mut conect_bonds = Vec::new();
         conect_bonds.reserve(256);
 
+        // PDB is a fixed-column format, so every field here is a byte range.
+        // Slice with `get`, never `[..]`: a stray non-ASCII byte anywhere in
+        // these columns would otherwise split a UTF-8 character and panic on a
+        // file the user merely opened.
         for line in content.lines() {
-            match &line[..std::cmp::min(6, line.len())] {
-                "ATOM  " | "HETATM" => {
+            match line.get(..std::cmp::min(6, line.len())) {
+                Some("ATOM  ") | Some("HETATM") => {
                     if let Some(record) = AtomRecord::from_line(line) {
                         atoms.push(Atom::from_record(atoms.len(), record));
                     }
                 }
-                "CONECT" => {
+                Some("CONECT") => {
                     // Parse CONECT records for explicit bond information
-                    if line.len() >= 11 {
-                        if let Ok(atom1) = line[6..11].trim().parse::<usize>() {
-                            if atom1 > 0 {
-                                // CONECT records can have multiple bonded atoms
-                                for i in 0..4 {
-                                    let start = 11 + i * 5;
-                                    if start + 5 <= line.len() {
-                                        if let Ok(atom2) =
-                                            line[start..start + 5].trim().parse::<usize>()
-                                        {
-                                            if atom2 > 0 && atom1 < atom2 {
-                                                conect_bonds.push((atom1 - 1, atom2 - 1));
-                                                // Convert to 0-based
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    let Some(atom1) = line
+                        .get(6..11)
+                        .and_then(|field| field.trim().parse::<usize>().ok())
+                        .filter(|serial| *serial > 0)
+                    else {
+                        continue;
+                    };
+
+                    // CONECT records can have multiple bonded atoms
+                    for i in 0..4 {
+                        let start = 11 + i * 5;
+                        let Some(atom2) = line
+                            .get(start..start + 5)
+                            .and_then(|field| field.trim().parse::<usize>().ok())
+                        else {
+                            continue;
+                        };
+
+                        if atom2 > 0 && atom1 < atom2 {
+                            // Convert to 0-based
+                            conect_bonds.push((atom1 - 1, atom2 - 1));
                         }
                     }
                 }
@@ -848,6 +886,80 @@ mod tests {
     fn grid_handles_empty_and_single() {
         assert!(Molecule::infer_bonds(&[]).is_empty());
         assert!(Molecule::infer_bonds(&[atom_at("C", 0.0, 0.0, 0.0)]).is_empty());
+    }
+
+    #[test]
+    fn element_symbols_are_trimmed_on_construction() {
+        // Fixed-column formats pad the element field; a padded symbol must not
+        // eat the whole 3-byte inline budget.
+        assert_eq!(Element::new(" C ").as_str(), "C");
+        assert_eq!(Element::new("CL ").as_str(), "CL");
+        assert_eq!(Element::new("  ").as_str(), "");
+    }
+
+    #[test]
+    fn bond_endpoints_reject_out_of_range_indices() {
+        let mol = Molecule::from_atoms_bonds(
+            vec![atom_at("C", 0.0, 0.0, 0.0), atom_at("O", 0.12, 0.0, 0.0)],
+            vec![
+                Bond {
+                    atom_a: 0,
+                    atom_b: 1,
+                    order: 1,
+                },
+                // Topology and coordinates disagreeing on the atom count is a
+                // routine input, not a caller bug -- it must not panic.
+                Bond {
+                    atom_a: 0,
+                    atom_b: 99,
+                    order: 1,
+                },
+                Bond {
+                    atom_a: usize::MAX,
+                    atom_b: 0,
+                    order: 1,
+                },
+            ],
+        );
+
+        assert!(mol.bond_endpoints(&mol.bonds[0]).is_some());
+        assert!(mol.bond_endpoints(&mol.bonds[1]).is_none());
+        assert!(mol.bond_endpoints(&mol.bonds[2]).is_none());
+
+        let invalid: Vec<usize> = mol.invalid_bonds().map(|(i, _)| i).collect();
+        assert_eq!(invalid, vec![1, 2]);
+    }
+
+    /// PDB is a fixed-column format, so the parser slices by byte offset. A
+    /// non-ASCII byte landing in one of those columns used to split a UTF-8
+    /// character and panic on a file the user merely opened.
+    #[test]
+    fn from_pdb_survives_non_ascii_in_fixed_columns() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "HEADER    a molecule").unwrap();
+        // Multi-byte characters straddling the 0..6 record-name columns, the
+        // 6..11 CONECT serial columns, and the 11..16 partner columns.
+        writeln!(file, "\u{e9}\u{e9}\u{e9}TAM  1  X").unwrap();
+        writeln!(file, "CONECT\u{e9}\u{e9}\u{e9}   2").unwrap();
+        writeln!(file, "CONECT    1\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}").unwrap();
+        writeln!(
+            file,
+            "ATOM      1  C   MOL A   1       1.000   2.000   3.000  1.00  0.00           C"
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "ATOM      2  O   MOL A   1       2.000   2.000   3.000  1.00  0.00           O"
+        )
+        .unwrap();
+        writeln!(file, "\u{3042}").unwrap();
+        file.flush().unwrap();
+
+        let mol = Molecule::from_pdb(file.path()).expect("non-ASCII lines should be skipped");
+        assert_eq!(mol.atoms.len(), 2);
+        assert!(mol.invalid_bonds().next().is_none());
     }
 
     #[test]

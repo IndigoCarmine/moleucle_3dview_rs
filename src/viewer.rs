@@ -18,16 +18,24 @@ pub enum ViewerEvent {
 pub type ColorFn = fn(&Atom, bool) -> (f32, f32, f32, f32);
 
 /// Default color function based on element type. Fully opaque (alpha = 1.0).
+///
+/// Matching is case-insensitive, like [`crate::vdw_radius`]. The loaders in this
+/// crate uppercase element symbols, but callers building `Atom`s by hand are
+/// free to use the conventional mixed case ("Cl"), and both must colour the
+/// same — an exact-case `"Cl"` arm here was simply unreachable.
 pub fn default_color_fn(atom: &Atom, _is_selected: bool) -> (f32, f32, f32, f32) {
-    match atom.element.as_str() {
-        "C" => (0.1, 0.1, 0.1, 1.0),  // Black/Dark Grey
-        "H" => (0.9, 0.9, 0.9, 1.0),  // White
-        "O" => (0.9, 0.1, 0.1, 1.0),  // Red
-        "N" => (0.1, 0.1, 0.9, 1.0),  // Blue
-        "S" => (0.9, 0.9, 0.1, 1.0),  // Yellow
-        "P" => (1.0, 0.6, 0.0, 1.0),  // Orange
-        "Cl" => (0.1, 0.9, 0.1, 1.0), // Green
-        _ => (0.7, 0.7, 0.7, 1.0),    // Grey
+    match atom.element.trim().as_bytes() {
+        [b'C' | b'c'] => (0.1, 0.1, 0.1, 1.0),                // Black/Dark Grey
+        [b'H' | b'h'] => (0.9, 0.9, 0.9, 1.0),                // White
+        [b'O' | b'o'] => (0.9, 0.1, 0.1, 1.0),                // Red
+        [b'N' | b'n'] => (0.1, 0.1, 0.9, 1.0),                // Blue
+        [b'S' | b's'] => (0.9, 0.9, 0.1, 1.0),                // Yellow
+        [b'P' | b'p'] => (1.0, 0.6, 0.0, 1.0),                // Orange
+        [b'C' | b'c', b'L' | b'l'] => (0.1, 0.9, 0.1, 1.0),   // Green
+        [b'B' | b'b', b'R' | b'r'] => (0.6, 0.15, 0.1, 1.0),  // Dark red
+        [b'I' | b'i'] => (0.55, 0.15, 0.65, 1.0),             // Purple
+        [b'F' | b'f'] => (0.55, 0.85, 0.45, 1.0),             // Pale green
+        _ => (0.7, 0.7, 0.7, 1.0),                            // Grey
     }
 }
 
@@ -162,11 +170,15 @@ impl MoleculeViewer {
                 }
             }
 
-            // Check Bonds
+            // Check Bonds. The radius must match what the ball-and-stick style
+            // draws its sticks at (`ball_stick_style::build_vertices`, which
+            // uses the same `default_ball_stick_bond_radius()`), or bonds become
+            // clickable somewhere other than where they appear.
+            let radius = default_ball_stick_bond_radius();
             for (i, bond) in mol.bonds.iter().enumerate() {
-                let p1 = mol.atoms[bond.atom_a].position;
-                let p2 = mol.atoms[bond.atom_b].position;
-                let radius = default_ball_stick_bond_radius(); // Must match update_scene
+                let Some((p1, p2)) = mol.bond_endpoints(bond) else {
+                    continue;
+                };
 
                 if let Some(t) = Self::ray_cylinder_intersect(ray_origin, ray_dir, p1, p2, radius) {
                     if t < closest_t && t > 0.0 {

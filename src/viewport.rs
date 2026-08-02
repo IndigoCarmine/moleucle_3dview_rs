@@ -190,12 +190,31 @@ fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortE
     }
 }
 
+/// Everything a hover pick's result depends on.
+///
+/// Picking is a linear ray test over every atom and every bond, and it runs on
+/// every frame the pointer is over the viewport — which, during trajectory
+/// playback or an animated UI, is continuous. Nothing about the result can
+/// change unless the pointer moved, the camera moved, or the geometry changed,
+/// so an unchanged key means the previous answer still holds.
+#[derive(Clone, Copy, PartialEq)]
+struct HoverPickKey {
+    pointer: [u32; 2],
+    view_proj: [u32; 16],
+    molecule_generation: u64,
+    atom_count: usize,
+}
+
 pub struct InteractiveMoleculeViewport {
     viewer: MoleculeViewer,
     controller: CameraController<camera::OrbitalCamera>,
     offscreen: OffscreenRenderer,
     shared_states: SharedRenderStates,
     on_event: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent)>,
+    /// The last hover pick and the inputs it was computed from, so a stationary
+    /// pointer over a still scene reuses the answer instead of re-running the
+    /// ray test. The event still fires every frame — only the scan is skipped.
+    last_hover_pick: Option<(HoverPickKey, Option<usize>)>,
 }
 
 impl InteractiveMoleculeViewport {
@@ -210,9 +229,10 @@ impl InteractiveMoleculeViewport {
         Self {
             viewer,
             controller: CameraController::<camera::OrbitalCamera>::new(),
-            offscreen: offscreen,
+            offscreen,
             shared_states,
             on_event: on_event.unwrap_or_else(|| Box::new(on_event_default)),
+            last_hover_pick: None,
         }
     }
 
@@ -503,20 +523,62 @@ impl InteractiveMoleculeViewport {
         Ok(())
     }
 
+    /// Key describing everything the hover pick at `pointer` depends on.
+    fn hover_pick_key(&self, pointer: egui::Pos2) -> HoverPickKey {
+        let view_proj = self.controller.camera.view_projection().data;
+        let mut view_proj_bits = [0u32; 16];
+        for (dst, src) in view_proj_bits.iter_mut().zip(view_proj.iter()) {
+            *dst = src.to_bits();
+        }
+
+        HoverPickKey {
+            pointer: [pointer.x.to_bits(), pointer.y.to_bits()],
+            view_proj: view_proj_bits,
+            molecule_generation: self
+                .viewer
+                .molecule
+                .as_ref()
+                .map(|mol| mol.generation())
+                .unwrap_or(0),
+            atom_count: self
+                .viewer
+                .molecule
+                .as_ref()
+                .map(|mol| mol.atoms.len())
+                .unwrap_or(0),
+        }
+    }
+
     fn handle_interaction(&mut self, ctx: &egui::Context, response: &egui::Response) {
         if response.hovered() {
             if let Some(pointer) = response.hover_pos() {
-                let local = pointer - response.rect.min;
-                let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
-                    local.x,
-                    local.y,
-                    response.rect.width().max(1.0),
-                    response.rect.height().max(1.0),
-                );
+                // Reuse the previous answer while nothing that could change it
+                // has moved. Without this, parking the cursor over the view
+                // costs a full ray scan of every atom and every bond, every
+                // frame. The event still fires every frame, so hosts that
+                // consume the hover per-frame see no behaviour change.
+                let key = self.hover_pick_key(pointer);
+                let picked = match self.last_hover_pick {
+                    Some((cached_key, picked)) if cached_key == key => picked,
+                    _ => {
+                        let local = pointer - response.rect.min;
+                        let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
+                            local.x,
+                            local.y,
+                            response.rect.width().max(1.0),
+                            response.rect.height().max(1.0),
+                        );
 
-                if let Some(crate::viewer::ViewerEvent::AtomClicked(i)) =
-                    self.viewer.pick(ray_origin, ray_dir)
-                {
+                        let picked = match self.viewer.pick(ray_origin, ray_dir) {
+                            Some(crate::viewer::ViewerEvent::AtomClicked(i)) => Some(i),
+                            _ => None,
+                        };
+                        self.last_hover_pick = Some((key, picked));
+                        picked
+                    }
+                };
+
+                if let Some(i) = picked {
                     let on_event = std::mem::replace(&mut self.on_event, Box::new(|_, _| {}));
                     on_event(self, ViewPortEvent::hovered { atom: i });
                     self.on_event = on_event;

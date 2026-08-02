@@ -31,13 +31,19 @@ pub(super) trait MolecularRenderStyle {
     ) -> Vec<Vertex>;
 }
 
-pub(super) fn style_for(render_style: RenderStyle) -> &'static dyn MolecularRenderStyle {
+/// The CPU vertex builder for `render_style`, or `None` for styles that are
+/// drawn entirely by GPU instancing.
+///
+/// `Circles` has no CPU geometry — it is drawn as ray-traced sphere impostors
+/// from an instance buffer — and the mesh styles fall back to that same
+/// pipeline above `MAX_MESH_ATOMS`. Returning `None` rather than panicking
+/// keeps a drift between that decision and this dispatch from taking the
+/// process down.
+pub(super) fn style_for(render_style: RenderStyle) -> Option<&'static dyn MolecularRenderStyle> {
     match render_style {
-        RenderStyle::BallStick => &ball_stick_style::BALL_STICK_STYLE,
-        RenderStyle::BallOnly => &ball_only_style::BALL_ONLY_STYLE,
-        RenderStyle::Wireframe => &wireframe_style::WIREFRAME_STYLE,
-        RenderStyle::Circles => {
-            panic!("Circles style uses a dedicated GPU instancing pipeline")
-        }
+        RenderStyle::BallStick => Some(&ball_stick_style::BALL_STICK_STYLE),
+        RenderStyle::BallOnly => Some(&ball_only_style::BALL_ONLY_STYLE),
+        RenderStyle::Wireframe => Some(&wireframe_style::WIREFRAME_STYLE),
+        RenderStyle::Circles => None,
     }
 }

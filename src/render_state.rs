@@ -50,31 +50,31 @@ pub fn with_state_mut_by_type<T: Any + Send + Sync>(
     }
 }
 
-// Backwards-compatible string-keyed helpers. Keep for now but prefer the type-keyed variants above.
-pub fn set_state<T: Any + Send + Sync>(states: &SharedRenderStates, key: &str, _value: T) {
-    if let Ok(mut map) = states.lock() {
-        map.insert(TypeId::of::<String>(), Box::new(key.to_string()));
-        // Store the actual value under a composite key derived from the provided string by hashing the string
-        // into a TypeId-like slot is not possible; keep original behavior via a separate internal string map
-        // is intentionally not implemented. Prefer using the typed API.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard for the removed string-keyed `set_state`, which
+    /// inserted its *key* under `TypeId::of::<String>()` and discarded the
+    /// caller's value — clobbering any `String` stored through the typed API.
+    #[test]
+    fn string_state_survives_the_typed_round_trip() {
+        let states = new_shared_states();
+        set_state_by_type(&states, "payload".to_string());
+
+        assert_eq!(
+            get_state_clone_by_type::<String>(&states).as_deref(),
+            Some("payload")
+        );
     }
-}
 
-#[allow(dead_code)]
-pub fn get_state_clone<T: Any + Send + Sync + Clone>(
-    _states: &SharedRenderStates,
-    _key: &str,
-) -> Option<T> {
-    // Deprecated: string-keyed access is no longer supported in the type-keyed map.
-    None
-}
+    #[test]
+    fn absent_and_mismatched_types_read_back_as_none() {
+        let states = new_shared_states();
+        assert_eq!(get_state_clone_by_type::<u32>(&states), None);
 
-#[allow(dead_code)]
-pub fn with_state_mut<T: Any + Send + Sync>(
-    _states: &SharedRenderStates,
-    _key: &str,
-    _init: T,
-    _f: impl FnOnce(&mut T),
-) {
-    // Deprecated placeholder
+        set_state_by_type(&states, 7u32);
+        assert_eq!(get_state_clone_by_type::<u32>(&states), Some(7));
+        assert_eq!(get_state_clone_by_type::<i32>(&states), None);
+    }
 }

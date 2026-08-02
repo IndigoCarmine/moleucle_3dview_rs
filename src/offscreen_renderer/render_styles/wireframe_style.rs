@@ -38,8 +38,9 @@ impl MolecularRenderStyle for WireframeStyle {
 
         if let Some(mol) = molecule {
             'bonds: for bond in &mol.bonds {
-                let a = mol.atoms[bond.atom_a].position;
-                let b = mol.atoms[bond.atom_b].position;
+                let Some((a, b)) = mol.bond_endpoints(bond) else {
+                    continue;
+                };
                 let diff = b - a;
                 let len = diff.magnitude();
                 if len < 0.001 {

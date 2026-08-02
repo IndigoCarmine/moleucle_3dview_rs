@@ -491,7 +491,7 @@ impl OffscreenRenderer {
         let style = if use_impostors {
             None
         } else {
-            Some(style_for(render_style))
+            style_for(render_style)
         };
 
         let cache_key = self.build_geometry_cache_key(frame);
@@ -956,8 +956,9 @@ impl OffscreenRenderer {
             if out.len() >= MAX_IMPOSTOR_INSTANCES {
                 break;
             }
-            let a = mol.atoms[bond.atom_a].position;
-            let b = mol.atoms[bond.atom_b].position;
+            let Some((a, b)) = mol.bond_endpoints(bond) else {
+                continue;
+            };
             let diff = b - a;
             let len = diff.magnitude();
             if len < 1e-4 {
