@@ -1,6 +1,10 @@
 //! Element radius lookup shared by bond inference and rendering.
+//!
+//! Radii are quoted in Ångström in the table below (that is how they are
+//! tabulated in the literature) and converted to the crate's nanometer
+//! convention on the way out.
 
-const ANGSTROM_TO_NM: f32 = 0.1;
+use crate::ANGSTROM_TO_NM;
 
 pub const BALL_STICK_ATOM_SCALE: f32 = 0.3;
 pub const BALL_STICK_SELECTED_ATOM_SCALE: f32 = 0.5;

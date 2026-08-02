@@ -1,88 +1,92 @@
-# Molecule 3D Viewer (Rust Library)
+# moleucle_3dview_rs
 
-A lightweight 3D molecule visualization library written in Rust. It utilizes the [graphics](https://crates.io/crates/graphics) crate (based on WGPU) for rendering and [bio_files](https://crates.io/crates/bio_files) for parsing molecular data.
+A lightweight 3D molecule viewer for [egui](https://crates.io/crates/egui), rendering
+through `wgpu`.
 
-This library provides a `MoleculeViewer` struct that can be integrated into your own Rust applications to render 3D molecule models.
+The crate draws into its own off-screen color/depth textures with hand-written wgpu
+pipelines and inline WGSL, then hands the result to egui as a texture — so the 3D view
+is just another widget inside an ordinary egui layout, not a separate window.
 
 ## Features
 
-- **3D Visualization**: Renders molecules as ball-and-stick models.
-  - Atoms are rendered as spheres.
-  - Bonds are rendered as cylinders.
-- **Element Coloring**: Atoms are colored based on their element type (C, H, O, N, S, P, Cl, etc.).
-- **Camera Controls**: Interactive camera using an Arc-ball control scheme (handled by the underlying graphics engine).
-- **Interaction**: picking support for atoms and bonds.
-- **File Format Support**: Helper methods to load `.mol2` files via `bio_files`.
+- **Four render styles**: ball-and-stick, ball-only, wireframe, and ray-traced sphere
+  impostors (`Circles`).
+- **Scales to MD-sized systems**: geometry is cached and only rebuilt when an input
+  actually changes; above ~58k atoms the mesh styles fall back automatically to the
+  instanced impostor pipeline, with bonds drawn as instanced cylinders. Systems of
+  several million atoms render.
+- **Trajectory playback**: `update_positions` moves atoms in place, keeping bonds,
+  metadata and the camera, and re-uploads only the position-dependent buffers.
+- **Level of detail**: an optional background worker lowers mesh resolution with
+  camera distance (`LodSettings`).
+- **Transparency**: per-molecule opacity and per-atom RGBA, drawn in a two-phase
+  opaque-then-translucent pass.
+- **Picking**: CPU ray picking for atoms and bonds, surfaced as viewport events.
+- **Overlays**: implement `AdditionalRender` to draw your own geometry in the same
+  pass — spheres, cylinders and raw meshes, on the triangle, wireframe or impostor
+  pipeline. Ships with a selected-atom highlight and a debug-ray overlay.
+- **Image export**: `render_image` renders off-screen at an arbitrary size with
+  optional region cropping and supersampling, independent of the on-screen viewport.
+- **File formats**: `.mol2`, `.pdb` and GROMACS `.gro` loaders, plus `AtomRecord`
+  for reading and writing PDB `ATOM`/`HETATM` lines.
 
+## Units
 
+**Every length in the public API is in nanometers** — positions, radii, cell edges.
+Loaders convert on the way in (PDB and MOL2 store Ångström; GRO already stores
+nanometers). The conversion factor is exported as `ANGSTROM_TO_NM` for callers writing
+their own parsers, and the `_angstrom` position setters are the only entry points that
+take Ångström.
 
 ## Usage
 
-Here is a basic example of how to use the library to create a viewer application:
+`InteractiveMoleculeViewport` is the type applications use: it owns the camera, the
+mouse handling, the off-screen renderer and the overlay list.
 
-```rust
-use graphics::{run, Scene, UiSettings, GraphicsSettings, EngineUpdates, EntityUpdate, ControlScheme};
-use lin_alg::f32::Vec3;
-use moleucle_3dview_rs::{Molecule, MoleculeViewer};
+```rust,no_run
+use moleucle_3dview_rs::{InteractiveMoleculeViewport, Molecule, SelectedAtomRender};
 use std::path::Path;
 
-fn main() {
-    // 1. Initialize Viewer State
-    let mut viewer = MoleculeViewer::new();
+struct App {
+    viewport: InteractiveMoleculeViewport,
+}
 
-    // 2. Load a molecule
-    if let Ok(mol) = Molecule::from_mol2(Path::new("Benzene.mol2")) {
-        viewer.set_molecule(mol);
+impl App {
+    fn new(path: &Path) -> Result<Self, String> {
+        let mut viewport = InteractiveMoleculeViewport::new(None);
+        viewport.add_additional_render_box(Box::new(SelectedAtomRender::new()));
+
+        viewport.set_molecule(Molecule::load(path)?);
+        viewport.focus_on_molecule_center();
+
+        Ok(Self { viewport })
     }
 
-    // 3. Initialize Graphics Scene with Defaults
-    let mut scene = Scene::default();
-    scene.camera.position = Vec3::new(0.0, 0.0, -10.0);
-    scene.input_settings.control_scheme = ControlScheme::Arc {
-        center: Vec3::new(0.0, 0.0, 0.0),
-    };
-
-    // 4. Update the scene with molecule meshes
-    viewer.update_scene(&mut scene);
-
-    // 5. Run the application loop
-    run(
-        viewer,
-        scene,
-        UiSettings::default(),
-        GraphicsSettings::default(),
-        // Render Handler
-        |viewer, scene, _dt| {
-            if viewer.dirty {
-                viewer.update_scene(scene);
-                EngineUpdates {
-                    meshes: true,
-                    entities: EntityUpdate::All,
-                    ..Default::default()
-                }
-            } else {
-                EngineUpdates::default()
-            }
-        },
-        // ... (other handlers)
-        |_viewer, _event, _scene, _is_synthetic, _dt| EngineUpdates::default(),
-        |viewer, event, scene, _dt| { /* Handle events like picking here */ EngineUpdates::default() },
-        |viewer, ctx, scene| { /* Draw additional UI here */ EngineUpdates::default() },
-    );
+    // Call once per frame from inside an egui layout. `render_state` comes from
+    // `eframe::CreationContext::wgpu_render_state`.
+    fn ui(&mut self, ui: &mut egui::Ui, render_state: &egui_wgpu::RenderState) {
+        if let Err(err) = self.viewport.show(ui, render_state) {
+            ui.colored_label(egui::Color32::RED, err);
+        }
+    }
 }
 ```
 
-For a complete runnable example, see `examples/simple_viewer.rs`.
+eframe must be running on the wgpu backend (`eframe::Renderer::Wgpu`), and
+`viewport.free_egui_texture(render_state)` should be called from `App::on_exit`.
 
-## Running the Example
+`MoleculeViewer` is the lower-level piece the viewport is built on — the molecule, its
+appearance overrides and CPU ray picking, with no egui or camera involvement. Reach for
+it only when driving `OffscreenRenderer` directly.
 
-To see the viewer in action using the provided example:
+## Running the example
 
-1.  Ensure you have a `.mol2` file (e.g., `Benzene.mol2`) in the project root.
-2.  Run the example:
+`examples/simple_viewer.rs` is a complete eframe app with a style picker, LOD sliders
+and transparency controls.
 
 ```bash
-cargo run --example simple_viewer
+cargo run --example simple_viewer            # loads A.pdb from the crate root
+cargo run --example simple_viewer -- FILE    # or any .mol2 / .pdb / .gro
 ```
 
 ## License

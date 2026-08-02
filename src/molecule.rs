@@ -1,8 +1,7 @@
 use crate::atom_radii::vdw_radius;
+use crate::ANGSTROM_TO_NM as ANGSTROM_TO_NANOMETER;
 use lin_alg::f32::Vec3;
 use std::path::Path;
-
-const ANGSTROM_TO_NANOMETER: f32 = 0.1;
 
 /// Compact, `Copy` element symbol stored inline so each atom carries no
 /// per-atom heap allocation for its element (the previous `String` cost ~24
