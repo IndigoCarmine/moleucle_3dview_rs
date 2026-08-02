@@ -56,6 +56,12 @@ pub struct MoleculeViewer {
     /// Optional per-atom RGBA color override (atom order). When `Some`, each
     /// entry replaces `color_fn`'s result for that atom; `None` uses `color_fn`.
     pub atom_colors: Option<Vec<[f32; 4]>>,
+    /// Optional per-atom visibility mask (atom order). See
+    /// [`MoleculeViewer::set_visible_atoms`].
+    visible_atoms: Option<Vec<bool>>,
+    /// Number of `true` entries in `visible_atoms`, cached because the renderer
+    /// consults it per frame to decide whether the mesh styles still fit.
+    visible_count: Option<usize>,
     /// Spatial index for ray picking, built lazily and rebuilt when `revision`
     /// changes. Behind a `Mutex` because `pick` takes `&self` — building it
     /// there rather than eagerly in `set_molecule` keeps loading a molecule you
@@ -73,6 +79,8 @@ impl MoleculeViewer {
             molecule_opacity: 1.0,
             atom_radii: None,
             atom_colors: None,
+            visible_atoms: None,
+            visible_count: None,
             pick_grid: Mutex::new(None),
         }
     }
@@ -87,6 +95,8 @@ impl MoleculeViewer {
             molecule_opacity: 1.0,
             atom_radii: None,
             atom_colors: None,
+            visible_atoms: None,
+            visible_count: None,
             pick_grid: Mutex::new(None),
         }
     }
@@ -142,6 +152,48 @@ impl MoleculeViewer {
     pub fn set_atom_colors(&mut self, colors: Option<Vec<[f32; 4]>>) {
         self.atom_colors = colors;
         self.bump_revision();
+    }
+
+    /// Hide part of the molecule without rebuilding it.
+    ///
+    /// `None` shows everything (the default, and allocation-free). With a mask,
+    /// `mask[i] == false` hides atom `i` and every bond incident to it.
+    ///
+    /// **Indices never renumber.** Picking results, [`Self::set_atom_radii`],
+    /// [`Self::set_atom_colors`], [`Self::update_positions`] and every
+    /// `AdditionalRender` continue to address the full molecule, so a caller
+    /// showing a subset does not have to maintain a parallel index space —
+    /// which is the whole point of doing this here rather than by pushing a
+    /// filtered copy of the molecule.
+    ///
+    /// A mask shorter than the molecule leaves the remaining atoms visible.
+    pub fn set_visible_atoms(&mut self, visible: Option<Vec<bool>>) {
+        self.visible_count = visible
+            .as_ref()
+            .map(|mask| mask.iter().filter(|shown| **shown).count());
+        self.visible_atoms = visible;
+        self.bump_revision();
+    }
+
+    /// The current visibility mask, or `None` when everything is visible.
+    pub fn visible_atoms(&self) -> Option<&[bool]> {
+        self.visible_atoms.as_deref()
+    }
+
+    /// How many atoms are currently drawn.
+    pub fn visible_atom_count(&self) -> usize {
+        let total = self.molecule.as_ref().map(|m| m.atoms.len()).unwrap_or(0);
+        match (self.visible_count, self.visible_atoms.as_ref()) {
+            // A mask shorter than the molecule leaves the rest visible.
+            (Some(counted), Some(mask)) => counted + total.saturating_sub(mask.len()),
+            _ => total,
+        }
+    }
+
+    /// Whether atom `index` is currently drawn.
+    #[inline]
+    pub fn is_atom_visible(&self, index: usize) -> bool {
+        crate::frame_state::is_visible(self.visible_atoms.as_deref(), index)
     }
 
     pub fn set_molecule(&mut self, molecule: Molecule) {
@@ -211,6 +263,12 @@ impl MoleculeViewer {
 
                 for &candidate in candidates {
                     let i = candidate as usize;
+                    // Hidden atoms are not drawn, so they must not be clickable
+                    // either -- otherwise clicking through a hidden shell
+                    // selects something the user cannot see.
+                    if !self.is_atom_visible(i) {
+                        continue;
+                    }
                     let Some(atom) = mol.atoms.get(i) else {
                         continue;
                     };
@@ -239,6 +297,9 @@ impl MoleculeViewer {
             // about a quarter of the cost of the full cylinder test.
             let radius = default_ball_stick_bond_radius();
             for (i, bond) in mol.bonds.iter().enumerate() {
+                if !self.is_atom_visible(bond.atom_a) || !self.is_atom_visible(bond.atom_b) {
+                    continue;
+                }
                 let Some((p1, p2)) = mol.bond_endpoints(bond) else {
                     continue;
                 };

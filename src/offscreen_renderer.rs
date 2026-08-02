@@ -514,7 +514,10 @@ impl OffscreenRenderer {
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let render_style = self.preference.render_style();
-        let atom_count = frame.molecule.map(|mol| mol.atoms.len()).unwrap_or(0);
+        // Count the atoms that will actually be drawn: hiding 90% of a large
+        // system should get the mesh styles back, not leave it stuck on the
+        // impostor fallback.
+        let atom_count = frame.visible_atom_count();
         // Mesh styles duplicate sphere geometry per atom and would overflow the
         // vertex buffer past MAX_MESH_ATOMS, silently dropping atoms. Fall back
         // to the instanced impostor pipeline so every atom is still drawn.
@@ -538,6 +541,7 @@ impl OffscreenRenderer {
                     molecule_opacity: frame.molecule_opacity,
                     atom_radii: frame.atom_radii,
                     atom_colors: frame.atom_colors,
+                    visible: frame.visible,
                 };
                 Some(active_style.build_vertices(&ctx, frame.molecule, frame.color_fn))
             } else {
@@ -1002,6 +1006,9 @@ impl OffscreenRenderer {
             if out.len() >= MAX_IMPOSTOR_INSTANCES {
                 break;
             }
+            if !frame.is_atom_visible(bond.atom_a) || !frame.is_atom_visible(bond.atom_b) {
+                continue;
+            }
             let Some((a, b)) = mol.bond_endpoints(bond) else {
                 continue;
             };
@@ -1033,10 +1040,17 @@ impl OffscreenRenderer {
         let opacity = frame.molecule_opacity;
         let radii = frame.atom_radii;
         let colors = frame.atom_colors;
+        let visible = frame.visible;
         match render_style {
-            RenderStyle::Circles => {
-                fill_circle_instances(out, frame.molecule, frame.color_fn, opacity, radii, colors)
-            }
+            RenderStyle::Circles => fill_circle_instances(
+                out,
+                frame.molecule,
+                frame.color_fn,
+                opacity,
+                radii,
+                colors,
+                visible,
+            ),
             RenderStyle::BallOnly => fill_sphere_instances(
                 out,
                 frame.molecule,
@@ -1044,6 +1058,7 @@ impl OffscreenRenderer {
                 opacity,
                 radii,
                 colors,
+                visible,
                 |atom| vdw_radius(&atom.element),
             ),
             // BallStick falls back here only when the mesh path would overflow;
@@ -1055,6 +1070,7 @@ impl OffscreenRenderer {
                 opacity,
                 radii,
                 colors,
+                visible,
                 |atom| ball_stick_radius(&atom.element, false),
             ),
             RenderStyle::Wireframe => out.clear(),

@@ -298,11 +298,44 @@ impl InteractiveMoleculeViewport {
         )
         .unwrap_or_default()
     }
+    /// Hide part of the molecule without rebuilding it. See
+    /// [`MoleculeViewer::set_visible_atoms`] — indices never renumber, so
+    /// picking results and every per-atom array stay in full-molecule space.
+    pub fn set_visible_atoms(&mut self, visible: Option<Vec<bool>>) {
+        self.viewer.set_visible_atoms(visible);
+    }
+
+    /// Frame the camera on what is currently drawn.
+    ///
+    /// Fits the *visible* atoms: hiding the solvent and then resetting the view
+    /// should frame the solute, not the box it used to sit in.
     pub fn focus_on_molecule_center(&mut self) {
-        if let Some(molecule) = self.viewer.molecule.as_ref() {
-            self.camera.center = molecule.center();
-            self.camera.radius = molecule.radius() * 2.0;
+        let Some(molecule) = self.viewer.molecule.as_ref() else {
+            return;
+        };
+
+        let mut sum = Vec3::new(0.0, 0.0, 0.0);
+        let mut count = 0usize;
+        for (index, atom) in molecule.atoms.iter().enumerate() {
+            if self.viewer.is_atom_visible(index) {
+                sum = sum + atom.position;
+                count += 1;
+            }
         }
+        if count == 0 {
+            return;
+        }
+
+        let center = sum / count as f32;
+        let mut radius = 0.0_f32;
+        for (index, atom) in molecule.atoms.iter().enumerate() {
+            if self.viewer.is_atom_visible(index) {
+                radius = radius.max((atom.position - center).magnitude());
+            }
+        }
+
+        self.camera.center = center;
+        self.camera.radius = radius.max(1e-3) * 2.0;
     }
 
     pub fn set_state_by_type<T: 'static + Send + Sync>(&mut self, state: T) {
@@ -451,6 +484,7 @@ impl InteractiveMoleculeViewport {
             self.viewer.molecule_opacity,
         )
         .with_geometry_revision(self.viewer.revision())
+        .with_visible_atoms(self.viewer.visible_atoms())
         .with_atom_attrs(
             self.viewer.atom_radii.as_deref(),
             self.viewer.atom_colors.as_deref(),
@@ -528,6 +562,7 @@ impl InteractiveMoleculeViewport {
             self.viewer.molecule_opacity,
         )
         .with_geometry_revision(self.viewer.revision())
+        .with_visible_atoms(self.viewer.visible_atoms())
         .with_atom_attrs(
             self.viewer.atom_radii.as_deref(),
             self.viewer.atom_colors.as_deref(),

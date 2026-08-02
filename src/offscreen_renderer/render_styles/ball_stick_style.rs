@@ -83,6 +83,9 @@ pub(super) fn build_ballstick_vertices(
     if let Some(mol) = molecule {
         if include_bonds {
             'bonds: for bond in &mol.bonds {
+                if !context.is_bond_visible(bond) {
+                    continue;
+                }
                 let Some((a, b)) = mol.bond_endpoints(bond) else {
                     continue;
                 };
@@ -137,6 +140,9 @@ pub(super) fn build_ballstick_vertices(
         }
 
         'atoms: for (i, atom) in mol.atoms.iter().enumerate() {
+            if !context.is_atom_visible(i) {
+                continue;
+            }
             let pos = atom.position;
             // Per-atom radius / color overrides (e.g. CG beads) when supplied,
             // else the element-derived radius and the color function.
@@ -231,4 +237,117 @@ fn estimate_ballstick_vertices(
     atom_vertices
         .saturating_add(bond_vertices)
         .saturating_add(axis_vertices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::molecule::{Atom, Bond, Element};
+    use crate::offscreen_renderer::{OffscreenRendererPreference, DEFAULT_BOND_CYLINDER_SIDES};
+    use crate::viewer::default_color_fn;
+
+    /// A short chain: atoms in a line, bonded to their neighbour.
+    fn chain(count: usize) -> Molecule {
+        let atoms = (0..count)
+            .map(|i| Atom {
+                position: Vec3::new(i as f32 * 0.15, 0.0, 0.0),
+                element: Element::new("C"),
+                id: i,
+                meta: None,
+            })
+            .collect();
+        let bonds = (0..count.saturating_sub(1))
+            .map(|i| Bond {
+                atom_a: i,
+                atom_b: i + 1,
+                order: 1,
+            })
+            .collect();
+        Molecule::from_atoms_bonds(atoms, bonds)
+    }
+
+    fn vertex_count(molecule: &Molecule, visible: Option<&[bool]>) -> usize {
+        let preference = OffscreenRendererPreference::default();
+        let resolution = preference.mesh_resolution();
+        let sphere = RenderMesh::new_sphere_uv(1.0, resolution, resolution * 2);
+        let cylinder = RenderMesh::new_cylinder_open_ended(1.0, 1.0, DEFAULT_BOND_CYLINDER_SIDES);
+
+        let context = StyleBuildContext {
+            preference,
+            sphere_mesh: &sphere,
+            cylinder_mesh: &cylinder,
+            molecule_opacity: 1.0,
+            atom_radii: None,
+            atom_colors: None,
+            visible,
+        };
+
+        build_ballstick_vertices(&context, Some(molecule), default_color_fn, true).len()
+    }
+
+    /// Per-atom and per-bond vertex costs, derived from the empty/one-atom/
+    /// two-atom cases rather than hard-coded, so the test survives a change of
+    /// mesh resolution.
+    fn costs(molecule_of: impl Fn(usize) -> Molecule) -> (usize, usize) {
+        let one = vertex_count(&molecule_of(1), None);
+        let two = vertex_count(&molecule_of(2), None);
+        // Going from one atom to two adds one atom and one bond.
+        (one, two - one - one)
+    }
+
+    #[test]
+    fn hiding_an_atom_removes_it_and_every_bond_touching_it() {
+        let molecule = chain(4);
+        let (per_atom, per_bond) = costs(chain);
+        assert!(per_atom > 0 && per_bond > 0);
+
+        let full = vertex_count(&molecule, None);
+        assert_eq!(full, 4 * per_atom + 3 * per_bond);
+
+        // Hide an interior atom: it takes both of its bonds with it.
+        let mut mask = vec![true; 4];
+        mask[1] = false;
+        assert_eq!(
+            vertex_count(&molecule, Some(&mask)),
+            3 * per_atom + 1 * per_bond,
+        );
+
+        // Hide an end atom: only its single bond goes.
+        let mut mask = vec![true; 4];
+        mask[3] = false;
+        assert_eq!(
+            vertex_count(&molecule, Some(&mask)),
+            3 * per_atom + 2 * per_bond,
+        );
+    }
+
+    #[test]
+    fn an_all_visible_mask_matches_no_mask() {
+        let molecule = chain(4);
+        assert_eq!(
+            vertex_count(&molecule, None),
+            vertex_count(&molecule, Some(&[true; 4])),
+        );
+    }
+
+    #[test]
+    fn hiding_everything_draws_nothing() {
+        let molecule = chain(4);
+        assert_eq!(vertex_count(&molecule, Some(&[false; 4])), 0);
+    }
+
+    /// A mask that has fallen out of step with the molecule should show too
+    /// much rather than silently blank the view.
+    #[test]
+    fn a_short_mask_leaves_the_remaining_atoms_visible() {
+        let molecule = chain(4);
+        let (per_atom, per_bond) = costs(chain);
+
+        // Only atom 0 is described, and it is hidden. Atoms 1..4 stay visible,
+        // as do the two bonds between them.
+        assert_eq!(
+            vertex_count(&molecule, Some(&[false])),
+            3 * per_atom + 2 * per_bond,
+        );
+    }
 }

@@ -18,6 +18,23 @@ pub(super) struct StyleBuildContext<'a> {
     /// falls back to element-derived radii and `color_fn`.
     pub(super) atom_radii: Option<&'a [f32]>,
     pub(super) atom_colors: Option<&'a [[f32; 4]]>,
+    /// Optional per-atom visibility mask (atom order); `None` shows everything.
+    pub(super) visible: Option<&'a [bool]>,
+}
+
+impl StyleBuildContext<'_> {
+    /// Whether atom `index` should be drawn.
+    #[inline]
+    pub(super) fn is_atom_visible(&self, index: usize) -> bool {
+        crate::frame_state::is_visible(self.visible, index)
+    }
+
+    /// Whether both of a bond's endpoints are drawn. Hiding an atom hides the
+    /// bonds hanging off it, or they would end in mid-air.
+    #[inline]
+    pub(super) fn is_bond_visible(&self, bond: &crate::molecule::Bond) -> bool {
+        self.is_atom_visible(bond.atom_a) && self.is_atom_visible(bond.atom_b)
+    }
 }
 
 pub(super) trait MolecularRenderStyle {

@@ -38,6 +38,9 @@ impl MolecularRenderStyle for WireframeStyle {
 
         if let Some(mol) = molecule {
             'bonds: for bond in &mol.bonds {
+                if !context.is_bond_visible(bond) {
+                    continue;
+                }
                 let Some((a, b)) = mol.bond_endpoints(bond) else {
                     continue;
                 };
@@ -70,6 +73,9 @@ impl MolecularRenderStyle for WireframeStyle {
             }
 
             'atoms: for (i, atom) in mol.atoms.iter().enumerate() {
+                if !context.is_atom_visible(i) {
+                    continue;
+                }
                 let pos = atom.position;
                 let span = 0.02;
                 // Per-atom color override when supplied, else the color function.

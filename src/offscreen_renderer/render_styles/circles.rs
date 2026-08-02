@@ -34,6 +34,7 @@ pub(crate) fn fill_sphere_instances(
     molecule_opacity: f32,
     atom_radii: Option<&[f32]>,
     atom_colors: Option<&[[f32; 4]]>,
+    visible: Option<&[bool]>,
     radius_for: impl Fn(&Atom) -> f32,
 ) {
     out.clear();
@@ -45,6 +46,9 @@ pub(crate) fn fill_sphere_instances(
     for (i, atom) in mol.atoms.iter().enumerate() {
         if out.len() >= MAX_IMPOSTOR_INSTANCES {
             break;
+        }
+        if !crate::frame_state::is_visible(visible, i) {
+            continue;
         }
 
         // Per-atom radius override (e.g. CG beads), else the style's default.
@@ -64,6 +68,7 @@ pub(crate) fn fill_sphere_instances(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_circle_instances(
     out: &mut Vec<CircleInstance>,
     molecule: Option<&Molecule>,
@@ -71,6 +76,7 @@ pub(crate) fn fill_circle_instances(
     molecule_opacity: f32,
     atom_radii: Option<&[f32]>,
     atom_colors: Option<&[[f32; 4]]>,
+    visible: Option<&[bool]>,
 ) {
     // Scale down for better visibility in the circles style.
     fill_sphere_instances(
@@ -80,6 +86,7 @@ pub(crate) fn fill_circle_instances(
         molecule_opacity,
         atom_radii,
         atom_colors,
+        visible,
         |atom| vdw_radius(&atom.element) * 0.5,
     )
 }

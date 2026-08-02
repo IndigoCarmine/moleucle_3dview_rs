@@ -40,6 +40,14 @@ pub struct RenderFrameState<'a> {
     /// present, entry `i` replaces `color_fn`'s result for atom `i` (indices
     /// past the end fall back to `color_fn`). `molecule_opacity` still applies.
     pub atom_colors: Option<&'a [[f32; 4]]>,
+    /// Optional per-atom visibility mask, indexed by atom order. `None` means
+    /// every atom is visible. Where present, `visible[i] == false` hides atom
+    /// `i` and every bond incident to it; indices past the end count as visible.
+    ///
+    /// **Indices never renumber.** Picking results, the per-atom radius and
+    /// color overrides, `update_positions` and every `AdditionalRender` stay in
+    /// full-molecule index space regardless of what is hidden.
+    pub visible: Option<&'a [bool]>,
     /// Background the color target is cleared to, as straight (non-premultiplied)
     /// RGBA in `0.0..=1.0`. An alpha of `0.0` leaves the background fully
     /// transparent, which is what image export wants; the interactive view keeps
@@ -51,6 +59,19 @@ pub struct RenderFrameState<'a> {
 /// used. `RenderFrameState::new` defaults to it so existing callers are
 /// unaffected by `clear_color` being added.
 pub const DEFAULT_CLEAR_COLOR: [f32; 4] = [0.08, 0.10, 0.14, 1.0];
+
+/// Whether atom `index` is visible under `mask`.
+///
+/// `None` means everything is visible, and an index past the end of the mask
+/// counts as visible — a mask that has fallen out of step with the molecule
+/// should show too much, not silently blank the view.
+#[inline]
+pub(crate) fn is_visible(mask: Option<&[bool]>, index: usize) -> bool {
+    match mask {
+        Some(mask) => mask.get(index).copied().unwrap_or(true),
+        None => true,
+    }
+}
 
 /// A revision value that is never equal to any previously issued one, so the
 /// renderer's geometry cache always misses.
@@ -99,7 +120,33 @@ impl<'a> RenderFrameState<'a> {
             molecule_opacity,
             atom_radii: None,
             atom_colors: None,
+            visible: None,
             clear_color: DEFAULT_CLEAR_COLOR,
+        }
+    }
+
+    /// Attach a per-atom visibility mask (see [`RenderFrameState::visible`]).
+    pub fn with_visible_atoms(mut self, visible: Option<&'a [bool]>) -> Self {
+        self.visible = visible;
+        self
+    }
+
+    /// Whether atom `index` should be drawn. Always true when no mask is set.
+    #[inline]
+    pub fn is_atom_visible(&self, index: usize) -> bool {
+        is_visible(self.visible, index)
+    }
+
+    /// How many atoms this frame will draw.
+    pub fn visible_atom_count(&self) -> usize {
+        let total = self.molecule.map(|mol| mol.atoms.len()).unwrap_or(0);
+        match self.visible {
+            // A mask shorter than the molecule leaves the rest visible.
+            Some(mask) => {
+                mask.iter().take(total).filter(|shown| **shown).count()
+                    + total.saturating_sub(mask.len())
+            }
+            None => total,
         }
     }
 
