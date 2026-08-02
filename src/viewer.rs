@@ -1,8 +1,10 @@
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::molecule::{Atom, Molecule};
+use crate::spatial_grid::SpatialGrid;
 use crate::AdditionalRender;
 // Viewer no longer owns shared state; state is passed in by the caller (viewport or user).
 use lin_alg::f32::Vec3;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum ViewerEvent {
@@ -54,6 +56,11 @@ pub struct MoleculeViewer {
     /// Optional per-atom RGBA color override (atom order). When `Some`, each
     /// entry replaces `color_fn`'s result for that atom; `None` uses `color_fn`.
     pub atom_colors: Option<Vec<[f32; 4]>>,
+    /// Spatial index for ray picking, built lazily and rebuilt when `revision`
+    /// changes. Behind a `Mutex` because `pick` takes `&self` — building it
+    /// there rather than eagerly in `set_molecule` keeps loading a molecule you
+    /// never click on free.
+    pick_grid: Mutex<Option<(u64, Arc<SpatialGrid>)>>,
 }
 
 impl MoleculeViewer {
@@ -66,6 +73,7 @@ impl MoleculeViewer {
             molecule_opacity: 1.0,
             atom_radii: None,
             atom_colors: None,
+            pick_grid: Mutex::new(None),
         }
     }
 
@@ -79,6 +87,7 @@ impl MoleculeViewer {
             molecule_opacity: 1.0,
             atom_radii: None,
             atom_colors: None,
+            pick_grid: Mutex::new(None),
         }
     }
 
@@ -178,33 +187,67 @@ impl MoleculeViewer {
         self.bump_revision();
     }
 
+    /// Ray-test the molecule and report the nearest atom or bond hit.
+    ///
+    /// `ray_dir` must be normalised (which is what
+    /// [`crate::Camera::ray_from_screen`] returns), so the intersection
+    /// parameter is a distance.
     pub fn pick(&self, ray_origin: Vec3, ray_dir: Vec3) -> Option<ViewerEvent> {
         let mut closest_t = f32::MAX;
         let mut picked = None;
 
         if let Some(mol) = &self.molecule {
-            // Check Atoms
-            for (i, atom) in mol.atoms.iter().enumerate() {
-                let radius = ball_stick_radius(&atom.element, false);
-                if let Some(t) =
-                    Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius)
-                {
-                    if t < closest_t && t > 0.0 {
-                        closest_t = t;
-                        picked = Some(ViewerEvent::AtomClicked(i));
+            // Atoms, through the spatial grid: walk the cells the ray actually
+            // crosses, nearest first, and stop as soon as no unvisited cell can
+            // contain anything closer. A linear scan here cost one ray-sphere
+            // test per atom per pointer move -- millions, on an MD system.
+            let grid = self.atom_pick_grid();
+            grid.for_each_along_ray(ray_origin, ray_dir, |candidates, cell_entry_t| {
+                // Cells are visited in increasing distance, so nothing beyond
+                // this one can beat a hit we already have.
+                if closest_t < cell_entry_t {
+                    return false;
+                }
+
+                for &candidate in candidates {
+                    let i = candidate as usize;
+                    let Some(atom) = mol.atoms.get(i) else {
+                        continue;
+                    };
+                    let radius = ball_stick_radius(&atom.element, false);
+                    if let Some(t) =
+                        Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius)
+                    {
+                        if t < closest_t && t > 0.0 {
+                            closest_t = t;
+                            picked = Some(ViewerEvent::AtomClicked(i));
+                        }
                     }
                 }
-            }
+                true
+            });
 
-            // Check Bonds. The radius must match what the ball-and-stick style
-            // draws its sticks at (`ball_stick_style::build_vertices`, which
-            // uses the same `default_ball_stick_bond_radius()`), or bonds become
+            // Bonds. The radius must match what the ball-and-stick style draws
+            // its sticks at (`ball_stick_style::build_vertices`, which uses the
+            // same `default_ball_stick_bond_radius()`), or bonds become
             // clickable somewhere other than where they appear.
+            //
+            // Left as a linear scan: bonds are not in the grid, and a molecule
+            // with bonds is one whose connectivity came from a file, which caps
+            // it well below the atom counts that made the atom scan a problem.
+            // The enclosing-sphere prefilter below rejects most of them for
+            // about a quarter of the cost of the full cylinder test.
             let radius = default_ball_stick_bond_radius();
             for (i, bond) in mol.bonds.iter().enumerate() {
                 let Some((p1, p2)) = mol.bond_endpoints(bond) else {
                     continue;
                 };
+
+                let mid = (p1 + p2) * 0.5;
+                let enclosing = (p2 - p1).magnitude() * 0.5 + radius;
+                if !Self::ray_hits_sphere(ray_origin, ray_dir, mid, enclosing) {
+                    continue;
+                }
 
                 if let Some(t) = Self::ray_cylinder_intersect(ray_origin, ray_dir, p1, p2, radius) {
                     if t < closest_t && t > 0.0 {
@@ -218,6 +261,54 @@ impl MoleculeViewer {
         let result = picked.unwrap_or(ViewerEvent::NothingClicked);
 
         Some(result)
+    }
+
+    /// The atom grid for picking, built on first use and reused until the
+    /// geometry changes.
+    fn atom_pick_grid(&self) -> Arc<SpatialGrid> {
+        let revision = self.revision;
+        if let Ok(cache) = self.pick_grid.lock() {
+            if let Some((cached_revision, grid)) = cache.as_ref() {
+                if *cached_revision == revision {
+                    return Arc::clone(grid);
+                }
+            }
+        }
+
+        let atoms: &[Atom] = self
+            .molecule
+            .as_ref()
+            .map(|mol| mol.atoms.as_slice())
+            .unwrap_or(&[]);
+        let radii: Vec<f32> = atoms
+            .iter()
+            .map(|atom| ball_stick_radius(&atom.element, false))
+            .collect();
+        // A cell no smaller than the largest sphere keeps the per-atom cell
+        // fan-out at build time down to a handful.
+        let cell_size = radii.iter().fold(0.0_f32, |m, &r| m.max(r)) * 4.0;
+        let grid = Arc::new(SpatialGrid::spheres(atoms, cell_size.max(1e-3), |i| {
+            radii[i]
+        }));
+
+        if let Ok(mut cache) = self.pick_grid.lock() {
+            *cache = Some((revision, Arc::clone(&grid)));
+        }
+        grid
+    }
+
+    /// Whether the ray passes within `radius` of `center` at a non-negative
+    /// distance. Cheaper than a full intersection when only rejection matters.
+    #[inline]
+    fn ray_hits_sphere(ray_origin: Vec3, ray_dir: Vec3, center: Vec3, radius: f32) -> bool {
+        let to_center = center - ray_origin;
+        let along = to_center.dot(ray_dir);
+        // Behind the ray and further than its own radius: cannot be hit.
+        if along < -radius {
+            return false;
+        }
+        let perpendicular_sq = to_center.magnitude_squared() - along * along;
+        perpendicular_sq <= radius * radius
     }
 
     fn ray_sphere_intersect(

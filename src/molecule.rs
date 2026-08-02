@@ -1,4 +1,5 @@
 use crate::atom_radii::vdw_radius;
+use crate::spatial_grid::SpatialGrid;
 use crate::ANGSTROM_TO_NM as ANGSTROM_TO_NANOMETER;
 use lin_alg::f32::Vec3;
 use std::path::Path;
@@ -315,9 +316,18 @@ impl Molecule {
     pub fn from_atoms_inferred_bonds(atoms: Vec<Atom>, cutoff: f32) -> Self {
         let cutoff_sq = cutoff * cutoff;
         let mut bonds = Vec::new();
+
+        // A cell of `cutoff` guarantees any pair within `cutoff` lands in the
+        // same or an adjacent cell, so the 3x3x3 search is exact.
+        let grid = SpatialGrid::points(&atoms, cutoff.max(1e-4));
         for i in 0..atoms.len() {
-            for j in (i + 1)..atoms.len() {
-                let d = atoms[i].position - atoms[j].position;
+            let pos_i = atoms[i].position;
+            grid.for_each_near(pos_i, |candidate| {
+                let j = candidate as usize;
+                if j <= i {
+                    return;
+                }
+                let d = pos_i - atoms[j].position;
                 let dist_sq = d.magnitude_squared();
                 // Guard against coincident atoms producing spurious zero-length bonds.
                 if dist_sq > 1e-8 && dist_sq < cutoff_sq {
@@ -327,8 +337,9 @@ impl Molecule {
                         order: 1,
                     });
                 }
-            }
+            });
         }
+
         Self::from_atoms_bonds(atoms, bonds)
     }
 
@@ -663,8 +674,7 @@ impl Molecule {
             return Vec::new();
         }
 
-        // Precompute radii once: vdw_radius() allocates a String per call, so
-        // looking it up inside the inner loop would dominate the runtime.
+        // Precompute radii once so the inner loop is pure arithmetic.
         let radii: Vec<f32> = atoms.iter().map(|a| vdw_radius(&a.element)).collect();
         let max_radius = radii.iter().fold(0.0_f32, |m, &r| m.max(r));
 
@@ -673,62 +683,26 @@ impl Molecule {
         // 2 * max_radius * factor, so a cell of that size guarantees every
         // bonded pair lands in the same or an adjacent cell.
         let cell_size = (2.0 * max_radius * BOND_DISTANCE_FACTOR).max(MIN_DISTANCE);
-        let inv_cell = 1.0 / cell_size;
-
-        // Bounding-box origin so cell indices stay small and non-negative-ish.
-        let mut min = atoms[0].position;
-        for atom in &atoms[1..] {
-            min.x = min.x.min(atom.position.x);
-            min.y = min.y.min(atom.position.y);
-            min.z = min.z.min(atom.position.z);
-        }
-
-        let cell_of = |p: Vec3| -> (i32, i32, i32) {
-            (
-                ((p.x - min.x) * inv_cell).floor() as i32,
-                ((p.y - min.y) * inv_cell).floor() as i32,
-                ((p.z - min.z) * inv_cell).floor() as i32,
-            )
-        };
-
-        // Bucket atom indices by grid cell.
-        let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
-            std::collections::HashMap::new();
-        for (i, atom) in atoms.iter().enumerate() {
-            grid.entry(cell_of(atom.position)).or_default().push(i);
-        }
+        let grid = SpatialGrid::points(atoms, cell_size);
 
         let mut bonds = Vec::with_capacity(atoms.len() * 2); // ~2 bonds per atom
-        let mut neighbors: Vec<usize> = Vec::new();
 
         for i in 0..atoms.len() {
             let pos_i = atoms[i].position;
             let radius_i = radii[i];
-            let (cx, cy, cz) = cell_of(pos_i);
 
-            // Gather candidate atoms from the 3x3x3 block of cells around i.
-            neighbors.clear();
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
-                            neighbors.extend_from_slice(bucket);
-                        }
-                    }
-                }
-            }
-
-            for &j in &neighbors {
+            grid.for_each_near(pos_i, |candidate| {
+                let j = candidate as usize;
                 // Each unordered pair is emitted once, preserving atom_a < atom_b.
                 if j <= i {
-                    continue;
+                    return;
                 }
 
                 let diff = atoms[j].position - pos_i;
                 let dist_sq = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 
                 if dist_sq < MIN_DISTANCE_SQ {
-                    continue;
+                    return;
                 }
 
                 let expected_dist = radius_i + radii[j];
@@ -741,7 +715,7 @@ impl Molecule {
                         order: 1,
                     });
                 }
-            }
+            });
         }
 
         bonds

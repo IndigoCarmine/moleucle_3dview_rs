@@ -63,6 +63,7 @@ pub mod offscreen_renderer;
 pub mod overlays;
 pub mod render_state;
 pub mod scene_types;
+mod spatial_grid;
 pub mod viewer;
 pub mod viewport;
 
