@@ -1,6 +1,6 @@
 use eframe::egui;
 use lin_alg::f32::Vec3;
-use moleucle_3dview_rs::additional_render::SelectedAtomRenderState;
+use moleucle_3dview_rs::SelectedAtomRenderState;
 // egui_wgpu::wgpu import removed (unused)
 use moleucle_3dview_rs::frame_state::RenderFrameState;
 use moleucle_3dview_rs::render_state::{get_state_clone_by_type, set_state_by_type};

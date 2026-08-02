@@ -1,4 +1,4 @@
-use crate::additional_render::{SelectedAtomRender, SelectedAtomRenderState};
+use crate::overlays::{SelectedAtomRender, SelectedAtomRenderState};
 use crate::frame_state::RenderFrameState;
 
 use crate::render_state::{

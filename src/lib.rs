@@ -60,17 +60,24 @@ pub mod camera;
 pub mod frame_state;
 pub mod molecule;
 pub mod offscreen_renderer;
+pub mod overlays;
 pub mod render_state;
 pub mod scene_types;
 pub mod viewer;
 pub mod viewport;
 
-pub use additional_render::{AdditionalRender, DebugRender, GpuPipeline, SelectedAtomRender};
+pub use additional_render::{AdditionalRender, GpuPipeline};
 pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
 pub use camera::{Camera, OrbitalCamera};
 pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
 pub use molecule::{Atom, AtomMeta, AtomRecord, Bond, Element, Molecule};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};
+pub use overlays::{
+    AtomGroup, AtomGroupRender, AtomGroupState, AtomPairRender, AtomPairState, AxesRender,
+    AxesState, DebugRender, DebugRenderState, OverlaySphere, PointCloudLayer, PointCloudRender,
+    PointCloudState, SelectedAtomRender, SelectedAtomRenderState, SimulationCellRender,
+    SimulationCellState, SphereSet, SphereSetRender, SphereSetState,
+};
 pub use render_state::{
     get_state_clone_by_type, new_shared_states, set_state_by_type, with_state_by_type,
     with_state_mut_by_type, SharedRenderStates,
