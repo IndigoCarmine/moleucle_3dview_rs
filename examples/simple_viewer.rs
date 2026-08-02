@@ -328,7 +328,7 @@ fn load_default_molecule() -> Result<Molecule, String> {
 
 impl eframe::App for SimpleViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("help").show_inside(ui, |ui| {
+        egui::Panel::top("help").show(ui, |ui| {
             ui.label("LMB: pick atom  RMB drag: orbit  MMB/Shift+RMB drag: pan  Wheel: dolly");
             ui.label(format!(
                 "Selected atoms: {}",
@@ -392,14 +392,14 @@ impl eframe::App for SimpleViewerApp {
                 ));
             }
         });
-        egui::Panel::bottom("footer").show_inside(ui, |ui| {
+        egui::Panel::bottom("footer").show(ui, |ui| {
             ui.label("Hovered atom: ".to_string() + &self.hovered_atom.borrow().to_string());
             ui.separator();
             ui.heading("Transparency / depth-write test");
             self.transparency_controls(ui);
         });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let Some(render_state) = &self.render_state else {
                 ui.heading("WGPU backend is unavailable");
                 ui.label("Start this example with the wgpu backend enabled in eframe.");

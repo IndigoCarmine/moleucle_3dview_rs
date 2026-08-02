@@ -57,7 +57,6 @@ pub const NM_TO_ANGSTROM: f32 = 10.0;
 pub mod additional_render;
 pub mod atom_radii;
 pub mod camera;
-pub mod controller;
 pub mod frame_state;
 pub mod molecule;
 pub mod offscreen_renderer;
@@ -68,8 +67,7 @@ pub mod viewport;
 
 pub use additional_render::{AdditionalRender, DebugRender, GpuPipeline, SelectedAtomRender};
 pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
-pub use camera::{Camera, OrbitalCamera, ProjectionType};
-pub use controller::CameraController;
+pub use camera::{Camera, OrbitalCamera};
 pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
 pub use molecule::{Atom, AtomMeta, AtomRecord, Bond, Element, Molecule};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};

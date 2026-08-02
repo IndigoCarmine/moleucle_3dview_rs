@@ -1,11 +1,5 @@
 use lin_alg::f32::{Mat4, Quaternion, Vec2, Vec3};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ProjectionType {
-    Perspective,
-    Orthographic,
-}
-
 pub trait Camera {
     fn view_matrix(&self) -> Mat4;
     fn projection_matrix(&self) -> Mat4;

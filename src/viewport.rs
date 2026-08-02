@@ -5,8 +5,8 @@ use crate::render_state::{
     get_state_clone_by_type, new_shared_states, set_state_by_type, SharedRenderStates,
 };
 use crate::{
-    camera, offscreen_renderer::LodSettings, Camera, CameraController, Molecule, MoleculeViewer,
-    OffscreenRenderer, RenderStyle,
+    camera, offscreen_renderer::LodSettings, Camera, Molecule, MoleculeViewer, OffscreenRenderer,
+    RenderStyle,
 };
 use lin_alg::f32::{Mat4, Vec3};
 use eframe::egui::{self, PointerButton, Sense};
@@ -190,6 +190,18 @@ fn on_event_default(viewport: &mut InteractiveMoleculeViewport, event: ViewPortE
     }
 }
 
+/// The camera a fresh viewport starts with.
+///
+/// The aspect ratio is only a placeholder — `show()` sets the real one from the
+/// widget rect every frame — but it must not be left at the camera's own default,
+/// because `render_image` can be called before the first `show()` and would then
+/// export at the wrong aspect.
+fn default_camera() -> camera::OrbitalCamera {
+    let mut camera = camera::OrbitalCamera::default();
+    camera.set_aspect(800.0 / 600.0);
+    camera
+}
+
 /// Everything a hover pick's result depends on.
 ///
 /// Picking is a linear ray test over every atom and every bond, and it runs on
@@ -208,7 +220,7 @@ struct HoverPickKey {
 
 pub struct InteractiveMoleculeViewport {
     viewer: MoleculeViewer,
-    controller: CameraController<camera::OrbitalCamera>,
+    camera: camera::OrbitalCamera,
     offscreen: OffscreenRenderer,
     shared_states: SharedRenderStates,
     on_event: Box<dyn Fn(&mut InteractiveMoleculeViewport, ViewPortEvent)>,
@@ -229,7 +241,7 @@ impl InteractiveMoleculeViewport {
 
         Self {
             viewer,
-            controller: CameraController::<camera::OrbitalCamera>::new(),
+            camera: default_camera(),
             offscreen,
             shared_states,
             on_event: on_event.unwrap_or_else(|| Box::new(on_event_default)),
@@ -271,8 +283,8 @@ impl InteractiveMoleculeViewport {
     }
     pub fn focus_on_molecule_center(&mut self) {
         if let Some(molecule) = self.viewer.molecule.as_ref() {
-            self.controller.camera.center = molecule.center();
-            self.controller.camera.radius = molecule.radius() * 2.0;
+            self.camera.center = molecule.center();
+            self.camera.radius = molecule.radius() * 2.0;
         }
     }
 
@@ -390,13 +402,13 @@ impl InteractiveMoleculeViewport {
         }
 
         let view_proj = {
-            let base = self.controller.camera.view_projection();
+            let base = self.camera.view_projection();
             match request.region {
                 Some(region) => (region_crop_matrix(region) * base).data,
                 None => base.data,
             }
         };
-        let cam_rot = self.controller.camera.camera_rotation();
+        let cam_rot = self.camera.camera_rotation();
         let camera_right = cam_rot.rotate_vec(Vec3::new(1.0, 0.0, 0.0));
         let camera_up = cam_rot.rotate_vec(Vec3::new(0.0, 1.0, 0.0));
         let camera_forward = cam_rot.rotate_vec(Vec3::new(0.0, 0.0, 1.0));
@@ -407,8 +419,8 @@ impl InteractiveMoleculeViewport {
         let frame = RenderFrameState::new(
             self.viewer.molecule.as_ref(),
             view_proj,
-            Some(self.controller.camera.position()),
-            self.controller.camera.fov_y(),
+            Some(self.camera.position()),
+            self.camera.fov_y(),
             camera_right,
             camera_up,
             camera_forward,
@@ -465,12 +477,11 @@ impl InteractiveMoleculeViewport {
         let available = ui.available_size_before_wrap();
         let width = available.x.max(1.0) as u32;
         let height = available.y.max(1.0) as u32;
-        self.controller
-            .camera
+        self.camera
             .set_aspect(width as f32 / height as f32);
 
         if let Some(molecule) = self.viewer.molecule.as_ref() {
-            let camera_position = self.controller.camera.position();
+            let camera_position = self.camera.position();
             let distance = (camera_position - molecule.center()).magnitude();
             self.offscreen.submit_lod_distance(distance);
         }
@@ -478,8 +489,8 @@ impl InteractiveMoleculeViewport {
         self.offscreen
             .ensure_resources(render_state, width, height)?;
 
-        let view_proj = self.controller.camera.view_projection().data;
-        let cam_rot = self.controller.camera.camera_rotation();
+        let view_proj = self.camera.view_projection().data;
+        let cam_rot = self.camera.camera_rotation();
         let camera_right = cam_rot.rotate_vec(Vec3::new(1.0, 0.0, 0.0));
         let camera_up = cam_rot.rotate_vec(Vec3::new(0.0, 1.0, 0.0));
         let camera_forward = cam_rot.rotate_vec(Vec3::new(0.0, 0.0, 1.0));
@@ -487,8 +498,8 @@ impl InteractiveMoleculeViewport {
         let frame = RenderFrameState::new(
             self.viewer.molecule.as_ref(),
             view_proj,
-            Some(self.controller.camera.position()),
-            self.controller.camera.fov_y(),
+            Some(self.camera.position()),
+            self.camera.fov_y(),
             camera_right,
             camera_up,
             camera_forward,
@@ -528,7 +539,7 @@ impl InteractiveMoleculeViewport {
 
     /// Key describing everything the hover pick at `pointer` depends on.
     fn hover_pick_key(&self, pointer: egui::Pos2) -> HoverPickKey {
-        let view_proj = self.controller.camera.view_projection().data;
+        let view_proj = self.camera.view_projection().data;
         let mut view_proj_bits = [0u32; 16];
         for (dst, src) in view_proj_bits.iter_mut().zip(view_proj.iter()) {
             *dst = src.to_bits();
@@ -554,7 +565,7 @@ impl InteractiveMoleculeViewport {
                     Some((cached_key, picked)) if cached_key == key => picked,
                     _ => {
                         let local = pointer - response.rect.min;
-                        let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
+                        let (ray_origin, ray_dir) = self.camera.ray_from_screen(
                             local.x,
                             local.y,
                             response.rect.width().max(1.0),
@@ -579,7 +590,7 @@ impl InteractiveMoleculeViewport {
 
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
-                self.controller.camera.dolly(scroll * 0.02);
+                self.camera.dolly(scroll * 0.02);
             }
         }
 
@@ -588,12 +599,10 @@ impl InteractiveMoleculeViewport {
             let delta = response.drag_delta();
             let shift_down = ctx.input(|i| i.modifiers.shift);
             if shift_down {
-                self.controller
-                    .camera
+                self.camera
                     .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
             } else {
-                self.controller
-                    .camera
+                self.camera
                     .orbit(delta.x * 0.005, delta.y * 0.005);
             }
         }
@@ -602,15 +611,14 @@ impl InteractiveMoleculeViewport {
             || response.dragged_by(PointerButton::Middle)
         {
             let delta = response.drag_delta();
-            self.controller
-                .camera
+            self.camera
                 .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
         }
 
         if response.clicked_by(PointerButton::Primary) {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let local = pointer - response.rect.min;
-                let (ray_origin, ray_dir) = self.controller.camera.ray_from_screen(
+                let (ray_origin, ray_dir) = self.camera.ray_from_screen(
                     local.x,
                     local.y,
                     response.rect.width().max(1.0),
