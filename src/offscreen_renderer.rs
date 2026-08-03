@@ -46,7 +46,7 @@ impl Default for OffscreenRendererPreference {
         Self {
             mesh_resolution: DEFAULT_MESH_RESOLUTION,
             lod_settings: LodSettings::default(),
-            render_style: RenderStyle::BallStick,
+            render_style: RenderStyle::default(),
             is_low_mode: false,
         }
     }
@@ -96,11 +96,22 @@ impl OffscreenRendererPreference {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RenderStyle {
+    /// Spheres and sticks. Shows connectivity, at the cost of a cylinder mesh
+    /// per bond.
     BallStick,
+    /// Space-filling spheres at the van der Waals radius, no bonds.
     BallOnly,
+    /// Ray-traced sphere impostors at half the van der Waals radius.
+    ///
+    /// The default. Each atom is a few bytes of instance data rather than a
+    /// mesh, so this is the one style whose cost does not grow with the sphere
+    /// resolution and the only one that scales to millions of atoms without
+    /// falling back to something else.
+    #[default]
     Circles,
+    /// Lines for bonds and a small cross per atom.
     Wireframe,
 }
 
