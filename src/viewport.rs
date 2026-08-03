@@ -629,7 +629,13 @@ impl InteractiveMoleculeViewport {
         // view therefore clears it.
         self.hovered_atom = None;
 
-        if response.hovered() {
+        // Orbiting is not pointing. The hover key includes the camera, so a drag
+        // misses the cache on every frame and re-runs the whole ray test --
+        // exactly when the frame budget is tightest. Skipping it also stops the
+        // hover readout chasing the cursor around while the user is rotating.
+        let navigating = response.dragged();
+
+        if response.hovered() && !navigating {
             if let Some(pointer) = response.hover_pos() {
                 // Reuse the previous answer while nothing that could change it
                 // has moved. Without this, parking the cursor over the view
@@ -659,7 +665,9 @@ impl InteractiveMoleculeViewport {
 
                 self.hovered_atom = picked;
             }
+        }
 
+        if response.hovered() {
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
                 self.camera.dolly(scroll * 0.02);

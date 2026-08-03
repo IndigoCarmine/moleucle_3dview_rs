@@ -325,6 +325,18 @@ impl MoleculeViewer {
             // contain anything closer. A linear scan here cost one ray-sphere
             // test per atom per pointer move -- millions, on an MD system.
             let grid = self.atom_pick_grid();
+
+            // Whole-molecule rejection first. `for_each_along_ray` already does
+            // its own slab test, but the bond scan below has no such guard, and
+            // with periodic images this runs once per image -- most of which the
+            // ray misses entirely.
+            let (min, max) = grid.bounds();
+            let bounds_center = (min + max) * 0.5;
+            let bounds_radius = (max - bounds_center).magnitude();
+            if !Self::ray_hits_sphere(ray_origin, ray_dir, bounds_center, bounds_radius) {
+                return;
+            }
+
             grid.for_each_along_ray(ray_origin, ray_dir, |candidates, cell_entry_t| {
                 // Cells are visited in increasing distance, so nothing beyond
                 // this one can beat a hit we already have.
@@ -595,6 +607,49 @@ mod tests {
         // A replication that draws nothing extra is not worth carrying.
         viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 1, 1])));
         assert!(viewer.periodic_images().is_none());
+    }
+
+    /// The whole-molecule rejection added in front of the ray test must not be
+    /// tighter than the geometry it guards. A bond at the very edge of the
+    /// structure is the case that would break first.
+    #[test]
+    fn the_ray_rejection_does_not_clip_edge_geometry() {
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(Molecule::from_atoms_bonds(
+            vec![
+                atom_at(0.0, 0.0, 0.0, 0),
+                // Far from the rest, so it sits on the bounding sphere's shell.
+                atom_at(20.0, 0.0, 0.0, 1),
+                atom_at(20.2, 0.0, 0.0, 2),
+            ],
+            vec![Bond {
+                atom_a: 1,
+                atom_b: 2,
+                order: 1,
+            }],
+        ));
+
+        // The outermost atom.
+        assert!(matches!(
+            viewer.pick(Vec3::new(20.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)),
+            Some(ViewerEvent::AtomClicked(1))
+        ));
+        // Its bond, whose midpoint is further out still.
+        assert!(matches!(
+            viewer.pick(Vec3::new(20.1, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)),
+            Some(ViewerEvent::BondClicked(0))
+        ));
+    }
+
+    /// A ray nowhere near the structure reports nothing -- the early-out must
+    /// not turn "missed" into a spurious hit.
+    #[test]
+    fn a_ray_that_misses_everything_picks_nothing() {
+        let viewer = one_atom_viewer();
+        assert!(matches!(
+            viewer.pick(Vec3::new(500.0, 500.0, 500.0), Vec3::new(0.0, 0.0, -1.0)),
+            Some(ViewerEvent::NothingClicked)
+        ));
     }
 
     /// Bonds are replicated with their atoms, so a replica's stick is clickable

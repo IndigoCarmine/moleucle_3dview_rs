@@ -201,6 +201,21 @@ impl SpatialGrid {
         [axis(extent.x), axis(extent.y), axis(extent.z)]
     }
 
+    /// The grid's axis-aligned extent, which contains every atom it holds
+    /// (padded by the radii it was built with).
+    pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
+        let layout = self.layout;
+        let size = layout.cell_size;
+        (
+            layout.origin,
+            Vec3::new(
+                layout.origin.x + layout.dims[0] as f32 * size,
+                layout.origin.y + layout.dims[1] as f32 * size,
+                layout.origin.z + layout.dims[2] as f32 * size,
+            ),
+        )
+    }
+
     #[inline]
     fn atoms_in(&self, cell: usize) -> &[u32] {
         let start = self.cell_starts[cell] as usize;
