@@ -17,6 +17,14 @@ is just another widget inside an ordinary egui layout, not a separate window.
   several million atoms render.
 - **Trajectory playback**: `update_positions` moves atoms in place, keeping bonds,
   metadata and the camera, and re-uploads only the position-dependent buffers.
+- **Periodic boundary conditions**: `set_periodic_images` tiles the molecule
+  across its simulation cell, per-axis, for rectangular and triclinic boxes
+  alike. The geometry is drawn once per image rather than duplicated, so a
+  replica costs one draw and 16 bytes; off-screen images are frustum-culled, and
+  picking a replica selects the atom it is a copy of.
+- **Partial visibility**: `set_visible_atoms` hides atoms and their bonds
+  without renumbering anything, so a host showing a subset does not have to
+  maintain a parallel index space.
 - **Level of detail**: an optional background worker lowers mesh resolution with
   camera distance (`LodSettings`).
 - **Transparency**: per-molecule opacity and per-atom RGBA, drawn in a two-phase
