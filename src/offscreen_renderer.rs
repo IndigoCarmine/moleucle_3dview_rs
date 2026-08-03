@@ -193,6 +193,10 @@ pub struct OffscreenRenderer {
     /// `write_buffer` into storage it already owns instead of a fresh
     /// allocation on both sides.
     additional_batches: Vec<AdditionalBatch>,
+    /// The molecule's bounding sphere and the revision it was measured at.
+    /// Recomputing it is O(atoms), and frustum-culling periodic images needs it
+    /// every frame.
+    molecule_bounds: Option<(u64, Vec3, f32)>,
     /// Reusable CPU scratch buffers for impostor/bond instances, kept across
     /// frames so trajectory playback refills them without reallocating.
     scratch_circle_instances: Vec<CircleInstance>,
@@ -219,6 +223,11 @@ struct AdditionalBatch {
     sphere_buffer: Option<wgpu::Buffer>,
     sphere_capacity: usize,
     sphere_count: u32,
+    /// World-space bounds of this batch's geometry, or `None` when it drew
+    /// nothing. Folded into the frame's bounding sphere so frustum culling
+    /// never discards an image whose overlay is on screen even though its atoms
+    /// are not.
+    bounds: Option<(Vec3, Vec3)>,
     /// Whether this batch has to draw in the translucent phase. Computed once
     /// when the batch is rebuilt rather than by rescanning every vertex and
     /// every impostor on every frame.
@@ -266,6 +275,7 @@ impl OffscreenRenderer {
             geometry_cache_key: None,
             additional_renders: Vec::new(),
             additional_batches: Vec::new(),
+            molecule_bounds: None,
             scratch_circle_instances: Vec::new(),
             scratch_bond_instances: Vec::new(),
         }
@@ -591,6 +601,19 @@ impl OffscreenRenderer {
             batch.vertices.clear();
             append_scene_triangles(&batch.scene, &mut batch.vertices, MAX_RENDER_VERTICES);
 
+            // Free: every vertex is already being touched.
+            batch.bounds = bounds_of(
+                batch
+                    .vertices
+                    .iter()
+                    .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2]))
+                    .chain(batch.scene.sphere_impostors.iter().flat_map(|s| {
+                        let c = Vec3::new(s.center[0], s.center[1], s.center[2]);
+                        let r = Vec3::new(s.radius, s.radius, s.radius);
+                        [c - r, c + r]
+                    })),
+            );
+
             // Decide the draw phase once, here, instead of rescanning every
             // vertex and impostor of every batch on every frame.
             batch.translucent = batch
@@ -600,6 +623,14 @@ impl OffscreenRenderer {
                 .any(|instance| instance.color[3] < 1.0)
                 || batch.vertices.iter().any(|v| v.color[3] < 1.0);
         }
+
+        // Measured here, before `gpu` takes a mutable borrow of `self`: the
+        // overlay batches above are already rebuilt, and caching the molecule's
+        // half needs `&mut self`.
+        let cull_sphere = frame
+            .periodic_images
+            .filter(|images| images.len() > 1)
+            .and_then(|_| self.frame_bounding_sphere(frame));
 
         let gpu = self
             .gpu
@@ -709,28 +740,51 @@ impl OffscreenRenderer {
             .queue
             .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        // One aligned uniform slot per periodic image. The geometry is already
-        // uploaded and is not touched: an image costs 16 bytes here and a
-        // `set_bind_group` in the pass below.
-        let image_offsets: Vec<u32> = frame
-            .periodic_images
-            .map(|images| images.translations().collect::<Vec<_>>())
-            .unwrap_or_else(|| vec![Vec3::new(0.0, 0.0, 0.0)])
-            .iter()
-            .enumerate()
-            .map(|(index, translation)| {
-                let offset = index as u32 * gpu.image_stride;
-                render_state.queue.write_buffer(
-                    &gpu.image_buffer,
-                    offset as u64,
-                    bytemuck::bytes_of(&gpu::ImageUniform {
-                        translation: [translation.x, translation.y, translation.z],
-                        _pad: 0.0,
-                    }),
-                );
-                offset
-            })
-            .collect();
+        // One aligned uniform slot per periodic image that survives culling. The
+        // geometry is already uploaded and is not touched: a drawn image costs
+        // 16 bytes here and a `set_bind_group` in the pass below.
+        //
+        // Culling matters more than it looks. An off-screen image is not free:
+        // the GPU still runs the vertex shader over every vertex before
+        // discarding it at the clip stage, so a 3x3x3 tiling of a large molecule
+        // would shade 27x the geometry however far in the camera is zoomed.
+        let image_offsets: Vec<u32> = {
+            let translations: Vec<Vec3> = frame
+                .periodic_images
+                .map(|images| images.translations().collect())
+                .unwrap_or_else(|| vec![Vec3::new(0.0, 0.0, 0.0)]);
+
+            let cull = cull_sphere.map(|(center, radius)| {
+                (
+                    crate::frustum::Frustum::from_view_proj(&frame.view_proj),
+                    center,
+                    radius,
+                )
+            });
+
+            translations
+                .iter()
+                .filter(|translation| match &cull {
+                    Some((frustum, center, radius)) => {
+                        frustum.intersects_sphere(*center + **translation, *radius)
+                    }
+                    None => true,
+                })
+                .enumerate()
+                .map(|(index, translation)| {
+                    let offset = index as u32 * gpu.image_stride;
+                    render_state.queue.write_buffer(
+                        &gpu.image_buffer,
+                        offset as u64,
+                        bytemuck::bytes_of(&gpu::ImageUniform {
+                            translation: [translation.x, translation.y, translation.z],
+                            _pad: 0.0,
+                        }),
+                    );
+                    offset
+                })
+                .collect()
+        };
 
         let mut encoder =
             render_state
@@ -1108,6 +1162,64 @@ impl OffscreenRenderer {
         }
     }
 
+    /// A sphere containing everything one image draws: the molecule's atoms and
+    /// every overlay's geometry.
+    ///
+    /// Overlays have to be in it — a simulation box reaches the cell corners,
+    /// well past the atoms — or an image whose box edge is on screen while its
+    /// atoms are not would be culled and the tiling would come apart at the
+    /// edges of the view.
+    ///
+    /// The molecule half is cached against the geometry revision: it is
+    /// O(atoms), and this runs every frame.
+    fn frame_bounding_sphere(&mut self, frame: &RenderFrameState<'_>) -> Option<(Vec3, f32)> {
+        let molecule_bounds = match self.molecule_bounds {
+            Some((revision, center, radius)) if revision == frame.geometry_revision => {
+                Some((center, radius))
+            }
+            _ => {
+                let measured = frame.molecule.and_then(|mol| {
+                    let (min, max) = bounds_of(mol.atoms.iter().map(|atom| atom.position))?;
+                    let center = (min + max) * 0.5;
+                    // Pad by the largest radius any style would draw, so the
+                    // sphere covers the atoms' surfaces and not just their
+                    // centres.
+                    let padding = mol
+                        .atoms
+                        .iter()
+                        .map(|atom| vdw_radius(&atom.element))
+                        .fold(0.0_f32, f32::max);
+                    Some((center, (max - center).magnitude() + padding))
+                });
+                self.molecule_bounds = measured
+                    .map(|(center, radius)| (frame.geometry_revision, center, radius));
+                measured
+            }
+        };
+
+        // Grow it to cover the overlays. They are rebuilt every frame, so their
+        // bounds are current by construction.
+        let mut sphere = molecule_bounds;
+        for batch in &self.additional_batches {
+            let Some((min, max)) = batch.bounds else {
+                continue;
+            };
+            let batch_center = (min + max) * 0.5;
+            let batch_radius = (max - batch_center).magnitude();
+            sphere = Some(match sphere {
+                None => (batch_center, batch_radius),
+                Some((center, radius)) => {
+                    // Smallest sphere about `center` that also contains the
+                    // batch's. Not minimal, but conservative and cheap.
+                    let reach = (batch_center - center).magnitude() + batch_radius;
+                    (center, radius.max(reach))
+                }
+            });
+        }
+
+        sphere
+    }
+
     fn build_geometry_cache_key(&self, frame: &RenderFrameState<'_>) -> GeometryCacheKey {
         GeometryCacheKey {
             geometry_revision: frame.geometry_revision,
@@ -1116,6 +1228,25 @@ impl OffscreenRenderer {
         }
     }
 
+}
+
+/// Axis-aligned bounds of a point cloud, or `None` when it is empty.
+fn bounds_of(points: impl Iterator<Item = Vec3>) -> Option<(Vec3, Vec3)> {
+    let mut bounds: Option<(Vec3, Vec3)> = None;
+    for p in points {
+        match &mut bounds {
+            None => bounds = Some((p, p)),
+            Some((min, max)) => {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+                max.z = max.z.max(p.z);
+            }
+        }
+    }
+    bounds
 }
 
 /// Bake a [`Scene`]'s entities into world-space triangles, appending to `out`.

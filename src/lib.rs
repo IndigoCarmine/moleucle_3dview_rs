@@ -57,6 +57,7 @@ pub const NM_TO_ANGSTROM: f32 = 10.0;
 pub mod additional_render;
 pub mod atom_radii;
 pub mod camera;
+mod frustum;
 pub mod frame_state;
 pub mod molecule;
 pub mod offscreen_renderer;
