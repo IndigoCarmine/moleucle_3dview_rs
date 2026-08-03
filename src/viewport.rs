@@ -298,6 +298,12 @@ impl InteractiveMoleculeViewport {
         )
         .unwrap_or_default()
     }
+    /// Draw the molecule in periodic images of a simulation cell. See
+    /// [`MoleculeViewer::set_periodic_images`].
+    pub fn set_periodic_images(&mut self, images: Option<crate::PeriodicImages>) {
+        self.viewer.set_periodic_images(images);
+    }
+
     /// Hide part of the molecule without rebuilding it. See
     /// [`MoleculeViewer::set_visible_atoms`] — indices never renumber, so
     /// picking results and every per-atom array stay in full-molecule space.
@@ -332,6 +338,18 @@ impl InteractiveMoleculeViewport {
             if self.viewer.is_atom_visible(index) {
                 radius = radius.max((atom.position - center).magnitude());
             }
+        }
+
+        // Frame the whole tiling, not just the primary cell: the replicas are
+        // drawn, so "reset the view" should show them. Each image is the
+        // primary cell rigidly translated, so its extent is the primary radius
+        // plus how far the image was moved.
+        if let Some(images) = self.viewer.periodic_images() {
+            let reach = images
+                .translations()
+                .map(|t| t.magnitude())
+                .fold(0.0_f32, f32::max);
+            radius += reach;
         }
 
         self.camera.center = center;
@@ -485,6 +503,7 @@ impl InteractiveMoleculeViewport {
         )
         .with_geometry_revision(self.viewer.revision())
         .with_visible_atoms(self.viewer.visible_atoms())
+        .with_periodic_images(self.viewer.periodic_images())
         .with_atom_attrs(
             self.viewer.atom_radii.as_deref(),
             self.viewer.atom_colors.as_deref(),
@@ -563,6 +582,7 @@ impl InteractiveMoleculeViewport {
         )
         .with_geometry_revision(self.viewer.revision())
         .with_visible_atoms(self.viewer.visible_atoms())
+        .with_periodic_images(self.viewer.periodic_images())
         .with_atom_attrs(
             self.viewer.atom_radii.as_deref(),
             self.viewer.atom_colors.as_deref(),

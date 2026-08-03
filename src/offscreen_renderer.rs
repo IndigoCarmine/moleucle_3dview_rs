@@ -709,6 +709,29 @@ impl OffscreenRenderer {
             .queue
             .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
+        // One aligned uniform slot per periodic image. The geometry is already
+        // uploaded and is not touched: an image costs 16 bytes here and a
+        // `set_bind_group` in the pass below.
+        let image_offsets: Vec<u32> = frame
+            .periodic_images
+            .map(|images| images.translations().collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![Vec3::new(0.0, 0.0, 0.0)])
+            .iter()
+            .enumerate()
+            .map(|(index, translation)| {
+                let offset = index as u32 * gpu.image_stride;
+                render_state.queue.write_buffer(
+                    &gpu.image_buffer,
+                    offset as u64,
+                    bytemuck::bytes_of(&gpu::ImageUniform {
+                        translation: [translation.x, translation.y, translation.z],
+                        _pad: 0.0,
+                    }),
+                );
+                offset
+            })
+            .collect();
+
         let mut encoder =
             render_state
                 .device
@@ -778,7 +801,14 @@ impl OffscreenRenderer {
             // batches with no bind group at all (a wgpu validation failure).
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
 
+            // Periodic images replay the identical draws with a different
+            // translation, selected by the dynamic offset into the image
+            // uniform. The image loop sits *inside* the phase loop so the
+            // opaque-before-translucent ordering still holds across the whole
+            // tiling rather than only within one image.
             for translucent_phase in [false, true] {
+              for &image_offset in &image_offsets {
+                pass.set_bind_group(1, &gpu.image_bind_group, &[image_offset]);
                 if molecule_translucent == translucent_phase {
                     let depth_write = !molecule_translucent;
 
@@ -855,6 +885,7 @@ impl OffscreenRenderer {
                         }
                     }
                 }
+              }
             }
         }
 

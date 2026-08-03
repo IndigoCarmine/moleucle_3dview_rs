@@ -48,6 +48,14 @@ pub struct RenderFrameState<'a> {
     /// color overrides, `update_positions` and every `AdditionalRender` stay in
     /// full-molecule index space regardless of what is hidden.
     pub visible: Option<&'a [bool]>,
+    /// Periodic images to draw the molecule in, or `None` for the primary cell
+    /// only.
+    ///
+    /// The geometry is drawn once per image with a different translation, so
+    /// images cost draw calls rather than memory — nothing here is duplicated.
+    /// Overlays are replicated too, so a highlight or a simulation box appears
+    /// in every image alongside the atoms it belongs to.
+    pub periodic_images: Option<&'a crate::PeriodicImages>,
     /// Background the color target is cleared to, as straight (non-premultiplied)
     /// RGBA in `0.0..=1.0`. An alpha of `0.0` leaves the background fully
     /// transparent, which is what image export wants; the interactive view keeps
@@ -121,8 +129,16 @@ impl<'a> RenderFrameState<'a> {
             atom_radii: None,
             atom_colors: None,
             visible: None,
+            periodic_images: None,
             clear_color: DEFAULT_CLEAR_COLOR,
         }
+    }
+
+    /// Draw the molecule in every periodic image of `images` (see
+    /// [`RenderFrameState::periodic_images`]).
+    pub fn with_periodic_images(mut self, images: Option<&'a crate::PeriodicImages>) -> Self {
+        self.periodic_images = images.filter(|images| !images.is_trivial());
+        self
     }
 
     /// Attach a per-atom visibility mask (see [`RenderFrameState::visible`]).

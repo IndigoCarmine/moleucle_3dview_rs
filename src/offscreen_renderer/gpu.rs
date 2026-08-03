@@ -4,6 +4,7 @@ use wgpu::util::DeviceExt;
 use super::render_styles::circles::CircleInstance;
 use super::{BondInstance, BondMeshVertex, CircleQuadVertex, RenderMesh, Uniforms, Vertex};
 use super::DEFAULT_BOND_CYLINDER_SIDES;
+use crate::periodic::MAX_PERIODIC_IMAGES;
 
 /// One render pipeline in two variants that differ *only* in
 /// `depth_write_enabled`. Depth *testing* (`LessEqual`) stays on in both.
@@ -55,6 +56,15 @@ fn depth_stencil_state(depth_write: bool) -> wgpu::DepthStencilState {
     }
 }
 
+/// One periodic image's translation. Padded to 16 bytes so it lines up with the
+/// std140 rules the WGSL side is compiled against.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub(super) struct ImageUniform {
+    pub(super) translation: [f32; 3],
+    pub(super) _pad: f32,
+}
+
 pub(super) struct GpuResources {
     pub(super) pipeline: PipelineSet,
     pub(super) additional_pipeline: PipelineSet,
@@ -63,6 +73,13 @@ pub(super) struct GpuResources {
     pub(super) bond_pipeline: PipelineSet,
     pub(super) uniform_buffer: wgpu::Buffer,
     pub(super) uniform_bind_group: wgpu::BindGroup,
+    /// Per-periodic-image translations, one aligned slot each, read through a
+    /// dynamic offset. See [`super::OffscreenRenderer::upload_image_translations`].
+    pub(super) image_buffer: wgpu::Buffer,
+    pub(super) image_bind_group: wgpu::BindGroup,
+    /// Distance between image slots, i.e. the device's minimum uniform binding
+    /// alignment.
+    pub(super) image_stride: u32,
     pub(super) vertex_buffer: Option<wgpu::Buffer>,
     pub(super) vertex_count: u32,
     /// Allocated byte capacity of `vertex_buffer`, so equal-size mesh rebuilds
@@ -154,6 +171,52 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         }],
     });
 
+    // Periodic images are drawn by replaying the same geometry with a different
+    // translation. Rather than duplicating vertices (27 copies of a large
+    // molecule is not affordable) or baking an image index into the instance
+    // data (which would collide with the per-atom instance attributes the
+    // impostor pipelines already use), each image is one aligned slot in a
+    // uniform buffer selected by a dynamic offset. Cost per image: 16 bytes and
+    // one `set_bind_group`.
+    let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("offscreen-image-layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(
+                    std::mem::size_of::<ImageUniform>() as u64
+                ),
+            },
+            count: None,
+        }],
+    });
+
+    let image_stride = device
+        .limits()
+        .min_uniform_buffer_offset_alignment
+        .max(std::mem::size_of::<ImageUniform>() as u32);
+    let image_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("offscreen-image-buffer"),
+        size: image_stride as u64 * MAX_PERIODIC_IMAGES as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("offscreen-image-bind-group"),
+        layout: &image_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &image_buffer,
+                offset: 0,
+                size: wgpu::BufferSize::new(std::mem::size_of::<ImageUniform>() as u64),
+            }),
+        }],
+    });
+
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-shader"),
         source: wgpu::ShaderSource::Wgsl(MESH_SHADER.into()),
@@ -161,7 +224,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("offscreen-layout"),
-        bind_group_layouts: &[Some(&uniform_layout)],
+        bind_group_layouts: &[Some(&uniform_layout), Some(&image_layout)],
         immediate_size: 0,
     });
 
@@ -239,6 +302,9 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         bond_pipeline,
         uniform_buffer,
         uniform_bind_group,
+        image_buffer,
+        image_bind_group,
+        image_stride,
         vertex_buffer: None,
         vertex_count: 0,
         vertex_capacity: 0,
@@ -553,6 +619,16 @@ struct Uniforms {
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
 
+// Translation carrying the primary cell onto the periodic image being drawn.
+// Zero for the primary cell itself. Selected per draw by a dynamic offset, so
+// every image reuses the same geometry buffers.
+struct ImageUniform {
+    translation: vec3<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> image: ImageUniform;
+
 @vertex
 fn vs_main(
     @location(0) position: vec3<f32>,
@@ -560,7 +636,7 @@ fn vs_main(
     @location(2) color: vec4<f32>,
 ) -> VSOut {
     var out: VSOut;
-    let clip = uniforms.view_proj * vec4<f32>(position, 1.0);
+    let clip = uniforms.view_proj * vec4<f32>(position + image.translation, 1.0);
     out.position = clip;
     out.color = color;
     out.normal = normal;
@@ -623,6 +699,16 @@ struct Uniforms {
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
 
+// Translation carrying the primary cell onto the periodic image being drawn.
+// Zero for the primary cell itself. Selected per draw by a dynamic offset, so
+// every image reuses the same geometry buffers.
+struct ImageUniform {
+    translation: vec3<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> image: ImageUniform;
+
 @vertex
 fn vs_main(
     @location(0) position: vec3<f32>,
@@ -630,7 +716,7 @@ fn vs_main(
     @location(2) color: vec4<f32>,
 ) -> VSOut {
     var out: VSOut;
-    out.position = uniforms.view_proj * vec4<f32>(position, 1.0);
+    out.position = uniforms.view_proj * vec4<f32>(position + image.translation, 1.0);
     out.color = color;
     return out;
 }
@@ -654,6 +740,16 @@ struct Uniforms {
 
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
+
+// Translation carrying the primary cell onto the periodic image being drawn.
+// Zero for the primary cell itself. Selected per draw by a dynamic offset, so
+// every image reuses the same geometry buffers.
+struct ImageUniform {
+    translation: vec3<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> image: ImageUniform;
 
 struct VSOut {
     @builtin(position) position: vec4<f32>,
@@ -680,8 +776,10 @@ fn vs_main(
 ) -> VSOut {
     var out: VSOut;
 
+    let center_ws = center + image.translation;
+
     let clip_center =
-        uniforms.view_proj * vec4<f32>(center, 1.0);
+        uniforms.view_proj * vec4<f32>(center_ws, 1.0);
 
     let inv_w =
         1.0 / max(abs(clip_center.w), 0.0001);
@@ -713,7 +811,7 @@ fn vs_main(
         clip_center.w,
     );
 
-    out.center = center;
+    out.center = center_ws;
     out.radius = radius;
     out.color = color;
 
@@ -803,6 +901,16 @@ struct Uniforms {
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
 
+// Translation carrying the primary cell onto the periodic image being drawn.
+// Zero for the primary cell itself. Selected per draw by a dynamic offset, so
+// every image reuses the same geometry buffers.
+struct ImageUniform {
+    translation: vec3<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> image: ImageUniform;
+
 struct VSOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
@@ -839,7 +947,7 @@ fn vs_main(
         normalize(right * normal.x + forward * normal.z);
 
     var out: VSOut;
-    out.position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
+    out.position = uniforms.view_proj * vec4<f32>(world_pos + image.translation, 1.0);
     out.color = color;
     out.normal = world_normal;
     return out;

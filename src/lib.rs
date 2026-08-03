@@ -61,6 +61,7 @@ pub mod frame_state;
 pub mod molecule;
 pub mod offscreen_renderer;
 pub mod overlays;
+pub mod periodic;
 pub mod render_state;
 pub mod scene_types;
 mod spatial_grid;
@@ -73,6 +74,7 @@ pub use camera::{Camera, OrbitalCamera};
 pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
 pub use molecule::{Atom, AtomMeta, AtomRecord, Bond, Element, Molecule};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};
+pub use periodic::{PeriodicImages, MAX_PERIODIC_IMAGES};
 pub use overlays::{
     AtomGroup, AtomGroupRender, AtomGroupState, AtomPairRender, AtomPairState, AxesRender,
     AxesState, DebugRender, DebugRenderState, OverlaySphere, PointCloudLayer, PointCloudRender,

@@ -1,5 +1,6 @@
 use crate::atom_radii::{ball_stick_radius, default_ball_stick_bond_radius};
 use crate::molecule::{Atom, Molecule};
+use crate::periodic::PeriodicImages;
 use crate::spatial_grid::SpatialGrid;
 use crate::AdditionalRender;
 // Viewer no longer owns shared state; state is passed in by the caller (viewport or user).
@@ -62,6 +63,9 @@ pub struct MoleculeViewer {
     /// Number of `true` entries in `visible_atoms`, cached because the renderer
     /// consults it per frame to decide whether the mesh styles still fit.
     visible_count: Option<usize>,
+    /// Periodic images the molecule is replicated into. See
+    /// [`MoleculeViewer::set_periodic_images`].
+    periodic_images: Option<PeriodicImages>,
     /// Spatial index for ray picking, built lazily and rebuilt when `revision`
     /// changes. Behind a `Mutex` because `pick` takes `&self` — building it
     /// there rather than eagerly in `set_molecule` keeps loading a molecule you
@@ -87,6 +91,7 @@ impl MoleculeViewer {
             atom_colors: None,
             visible_atoms: None,
             visible_count: None,
+            periodic_images: None,
             pick_grid: Mutex::new(None),
         }
     }
@@ -103,6 +108,7 @@ impl MoleculeViewer {
             atom_colors: None,
             visible_atoms: None,
             visible_count: None,
+            periodic_images: None,
             pick_grid: Mutex::new(None),
         }
     }
@@ -202,6 +208,28 @@ impl MoleculeViewer {
         crate::frame_state::is_visible(self.visible_atoms.as_deref(), index)
     }
 
+    /// Draw the molecule in periodic images of a simulation cell as well as in
+    /// the primary cell.
+    ///
+    /// The geometry is uploaded once and drawn once per image with a different
+    /// translation, so replicating costs draw calls but no extra memory and no
+    /// CPU rebuild — which is what makes it usable on systems where duplicating
+    /// the atoms 27 times would not be.
+    ///
+    /// Picking sees the images too: clicking a replica selects the atom it is a
+    /// copy of, in primary-cell indices.
+    pub fn set_periodic_images(&mut self, images: Option<PeriodicImages>) {
+        self.periodic_images = images.filter(|images| !images.is_trivial());
+        // Only the draw translation changes, not the geometry -- but picking
+        // caches its answer against this counter, so it has to move.
+        self.bump_revision();
+    }
+
+    /// The periodic images currently drawn, or `None` for the primary cell only.
+    pub fn periodic_images(&self) -> Option<&PeriodicImages> {
+        self.periodic_images.as_ref()
+    }
+
     pub fn set_molecule(&mut self, molecule: Molecule) {
         self.molecule = Some(molecule);
         self.bump_revision();
@@ -254,7 +282,44 @@ impl MoleculeViewer {
         let mut closest_t = f32::MAX;
         let mut picked = None;
 
-        if let Some(mol) = &self.molecule {
+        // Testing the ray against a molecule translated into an image is the
+        // same as testing the *translated ray* against the molecule where it
+        // is, so every image reuses the one spatial grid. The direction is
+        // unchanged, so the hit distances stay directly comparable and the
+        // nearest hit across all images wins -- which is what the user sees.
+        match self.periodic_images.as_ref() {
+            Some(images) => {
+                for translation in images.translations() {
+                    self.pick_in_image(
+                        ray_origin - translation,
+                        ray_dir,
+                        &mut closest_t,
+                        &mut picked,
+                    );
+                }
+            }
+            None => self.pick_in_image(ray_origin, ray_dir, &mut closest_t, &mut picked),
+        }
+
+        Some(picked.unwrap_or(ViewerEvent::NothingClicked))
+    }
+
+    /// Ray-test the primary cell, keeping `closest_t`/`picked` if nothing here
+    /// beats what is already there.
+    ///
+    /// Reported indices are always primary-cell indices, so clicking a periodic
+    /// replica selects the atom it is a copy of.
+    fn pick_in_image(
+        &self,
+        ray_origin: Vec3,
+        ray_dir: Vec3,
+        closest_t: &mut f32,
+        picked: &mut Option<ViewerEvent>,
+    ) {
+        {
+            let Some(mol) = &self.molecule else {
+                return;
+            };
             // Atoms, through the spatial grid: walk the cells the ray actually
             // crosses, nearest first, and stop as soon as no unvisited cell can
             // contain anything closer. A linear scan here cost one ray-sphere
@@ -263,7 +328,7 @@ impl MoleculeViewer {
             grid.for_each_along_ray(ray_origin, ray_dir, |candidates, cell_entry_t| {
                 // Cells are visited in increasing distance, so nothing beyond
                 // this one can beat a hit we already have.
-                if closest_t < cell_entry_t {
+                if *closest_t < cell_entry_t {
                     return false;
                 }
 
@@ -282,9 +347,9 @@ impl MoleculeViewer {
                     if let Some(t) =
                         Self::ray_sphere_intersect(ray_origin, ray_dir, atom.position, radius)
                     {
-                        if t < closest_t && t > 0.0 {
-                            closest_t = t;
-                            picked = Some(ViewerEvent::AtomClicked(i));
+                        if t < *closest_t && t > 0.0 {
+                            *closest_t = t;
+                            *picked = Some(ViewerEvent::AtomClicked(i));
                         }
                     }
                 }
@@ -317,17 +382,13 @@ impl MoleculeViewer {
                 }
 
                 if let Some(t) = Self::ray_cylinder_intersect(ray_origin, ray_dir, p1, p2, radius) {
-                    if t < closest_t && t > 0.0 {
-                        closest_t = t;
-                        picked = Some(ViewerEvent::BondClicked(i));
+                    if t < *closest_t && t > 0.0 {
+                        *closest_t = t;
+                        *picked = Some(ViewerEvent::BondClicked(i));
                     }
                 }
             }
         }
-
-        let result = picked.unwrap_or(ViewerEvent::NothingClicked);
-
-        Some(result)
     }
 
     /// The atom grid for picking, built on first use and reused until the
@@ -430,4 +491,130 @@ impl MoleculeViewer {
         None
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::molecule::{Bond, Element};
+    use crate::overlays::SimulationCellState;
+
+    fn atom_at(x: f32, y: f32, z: f32, id: usize) -> Atom {
+        Atom {
+            position: Vec3::new(x, y, z),
+            element: Element::new("C"),
+            id,
+            meta: None,
+        }
+    }
+
+    /// A single atom in a 10 nm cubic cell.
+    fn one_atom_viewer() -> MoleculeViewer {
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(Molecule::from_atoms_bonds(
+            vec![atom_at(0.0, 0.0, 0.0, 0)],
+            Vec::new(),
+        ));
+        viewer
+    }
+
+    fn cubic_cell(edge: f32) -> SimulationCellState {
+        SimulationCellState::rectangular(Vec3::new(edge, edge, edge))
+    }
+
+    /// Aim at where the +x replica sits. Without periodic images there is
+    /// nothing there; with them, the replica is hit and reports the *primary*
+    /// atom, because that is the atom the user means.
+    #[test]
+    fn picking_reaches_periodic_replicas_and_reports_primary_indices() {
+        let mut viewer = one_atom_viewer();
+        let replica = Vec3::new(10.0, 0.0, 0.0);
+
+        // Fire down -z at the replica's column.
+        let origin = replica + Vec3::new(0.0, 0.0, 5.0);
+        let direction = Vec3::new(0.0, 0.0, -1.0);
+
+        assert!(
+            matches!(
+                viewer.pick(origin, direction),
+                Some(ViewerEvent::NothingClicked)
+            ),
+            "nothing is there until the cell is replicated"
+        );
+
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 0, 0])));
+        assert!(
+            matches!(
+                viewer.pick(origin, direction),
+                Some(ViewerEvent::AtomClicked(0))
+            ),
+            "the replica should pick the atom it is a copy of"
+        );
+    }
+
+    /// Two replicas along the ray: the nearer one has to win, or clicking
+    /// selects something behind what the pointer is over.
+    #[test]
+    fn the_nearest_image_wins() {
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(Molecule::from_atoms_bonds(
+            vec![atom_at(0.0, 0.0, 0.0, 0), atom_at(0.0, 0.0, 3.0, 1)],
+            Vec::new(),
+        ));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [0, 0, 1])));
+
+        // Looking down -z from far away: atom 1 (z = 3) is nearest.
+        let picked = viewer.pick(Vec3::new(0.0, 0.0, 40.0), Vec3::new(0.0, 0.0, -1.0));
+        assert!(matches!(picked, Some(ViewerEvent::AtomClicked(1))), "{picked:?}");
+    }
+
+    #[test]
+    fn hidden_atoms_stay_unclickable_in_every_image() {
+        let mut viewer = one_atom_viewer();
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 0, 0])));
+        viewer.set_visible_atoms(Some(vec![false]));
+
+        let origin = Vec3::new(10.0, 0.0, 5.0);
+        assert!(matches!(
+            viewer.pick(origin, Vec3::new(0.0, 0.0, -1.0)),
+            Some(ViewerEvent::NothingClicked)
+        ));
+    }
+
+    /// Replication only changes where geometry is drawn, but picking caches its
+    /// answer against the revision, so the revision has to move with it.
+    #[test]
+    fn changing_the_images_bumps_the_revision() {
+        let mut viewer = one_atom_viewer();
+        let before = viewer.revision();
+
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 1, 1])));
+        assert_ne!(before, viewer.revision());
+        assert!(viewer.periodic_images().is_some());
+
+        // A replication that draws nothing extra is not worth carrying.
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [0, 0, 0])));
+        assert!(viewer.periodic_images().is_none());
+    }
+
+    /// Bonds are replicated with their atoms, so a replica's stick is clickable
+    /// too -- and reports the primary bond.
+    #[test]
+    fn bond_picking_reaches_replicas() {
+        let mut viewer = MoleculeViewer::new();
+        viewer.set_molecule(Molecule::from_atoms_bonds(
+            vec![atom_at(-1.0, 0.0, 0.0, 0), atom_at(1.0, 0.0, 0.0, 1)],
+            vec![Bond {
+                atom_a: 0,
+                atom_b: 1,
+                order: 1,
+            }],
+        ));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [0, 1, 0])));
+
+        // Aim at the midpoint of the +y replica's bond, which lies between its
+        // two atoms and so can only be a bond hit.
+        let picked = viewer.pick(Vec3::new(0.0, 10.0, 5.0), Vec3::new(0.0, 0.0, -1.0));
+        assert!(matches!(picked, Some(ViewerEvent::BondClicked(0))), "{picked:?}");
+    }
 }
