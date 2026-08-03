@@ -64,6 +64,13 @@ impl Default for AtomGroupRender {
 }
 
 impl AdditionalRender for AtomGroupRender {
+    /// One sphere per atom in every group, and a group can cover the whole
+    /// system -- so re-deriving this on every frame the camera merely moved is
+    /// real CPU time. Reporting a revision lets the renderer keep what it has.
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<AtomGroupState>()
+    }
+
     fn gpu_pipeline(&self) -> GpuPipeline {
         GpuPipeline::SphereImpostor
     }

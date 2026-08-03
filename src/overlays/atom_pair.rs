@@ -53,6 +53,13 @@ impl Default for AtomPairRender {
 }
 
 impl AdditionalRender for AtomPairRender {
+    /// One cylinder mesh per pair -- so re-deriving this on every frame the
+    /// camera merely moved is real CPU time. Reporting a revision lets the
+    /// renderer keep what it has.
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<AtomPairState>()
+    }
+
     fn update_scene(&self, scene: &mut Scene, frame_state: &RenderFrameState<'_>) {
         let Some(molecule) = frame_state.molecule else {
             return;

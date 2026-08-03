@@ -147,6 +147,34 @@ impl<'a> RenderFrameState<'a> {
         self
     }
 
+    /// A value that changes whenever anything an overlay keyed on `T` could
+    /// draw differently changes: its own state, the molecule, and the render
+    /// settings its geometry depends on.
+    ///
+    /// Return this from [`crate::AdditionalRender::revision`] and the renderer
+    /// will skip rebuilding the overlay while it holds still. It deliberately
+    /// bundles *every* input rather than letting each overlay pick — an overlay
+    /// that forgets one silently stops updating, which is far worse than
+    /// rebuilding a little more often than strictly necessary.
+    pub fn overlay_revision<T: std::any::Any + Send + Sync>(&self) -> Option<u64> {
+        let state_seq = crate::render_state::state_seq_by_type::<T>(self.shared_states?)?;
+
+        // A cheap order-sensitive mix; these are counters and small enums, not
+        // adversarial input, so anything that avoids trivial collisions will do.
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut mix = |value: u64| {
+            hash ^= value;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        };
+        mix(state_seq);
+        mix(self.geometry_revision);
+        mix(self.mesh_resolution as u64);
+        mix(self.render_style as u64);
+        mix(self.is_low_mode as u64);
+
+        Some(hash)
+    }
+
     /// Whether atom `index` should be drawn. Always true when no mask is set.
     #[inline]
     pub fn is_atom_visible(&self, index: usize) -> bool {

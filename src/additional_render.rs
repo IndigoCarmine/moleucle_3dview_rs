@@ -28,6 +28,26 @@ pub trait AdditionalRender: Send {
         GpuPipeline::Triangles
     }
 
+    /// A value that changes whenever this overlay would draw something
+    /// different, or `None` if it cannot say.
+    ///
+    /// `None` — the default — means "rebuild me every frame", which is always
+    /// correct. Returning `Some` lets the renderer skip `update_scene`, the
+    /// vertex build and the GPU upload entirely while the value holds still,
+    /// and redraw the retained buffers instead. For an overlay whose cost
+    /// scales with the structure that is the difference between a few
+    /// microseconds and several milliseconds of CPU time *per frame*, spent
+    /// re-deriving geometry nobody changed.
+    ///
+    /// Almost every implementation should be
+    /// [`RenderFrameState::overlay_revision`] over its own state type, which
+    /// folds in the molecule and the render settings as well. Getting this
+    /// wrong makes the overlay silently stop updating, so a hand-rolled value
+    /// needs to account for every input `update_scene` reads.
+    fn revision(&self, _frame: &RenderFrameState<'_>) -> Option<u64> {
+        None
+    }
+
     fn add_sphere(
         &self,
         scene: &mut Scene,

@@ -49,6 +49,13 @@ impl Default for SphereSetRender {
 }
 
 impl AdditionalRender for SphereSetRender {
+    /// One sphere per entry, and the sets hold whole structures -- so
+    /// re-deriving this on every frame the camera merely moved is real CPU
+    /// time. Reporting a revision lets the renderer keep what it has.
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<SphereSetState>()
+    }
+
     fn gpu_pipeline(&self) -> GpuPipeline {
         GpuPipeline::SphereImpostor
     }

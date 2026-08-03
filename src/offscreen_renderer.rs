@@ -232,6 +232,17 @@ struct AdditionalBatch {
     /// when the batch is rebuilt rather than by rescanning every vertex and
     /// every impostor on every frame.
     translucent: bool,
+    /// What [`AdditionalRender::revision`] returned when this batch was last
+    /// built. `None` means the overlay does not report one, so it is rebuilt
+    /// every frame.
+    revision: Option<u64>,
+    /// Whether this batch has ever been built. Distinguishes "revision matches,
+    /// reuse the buffers" from "first frame, nothing uploaded yet".
+    built: bool,
+    /// Set when the CPU geometry changed and the GPU copy is behind it.
+    /// Without this a steady overlay would re-upload identical bytes every
+    /// frame -- megabytes across the bus for geometry the GPU already has.
+    needs_upload: bool,
 }
 
 impl OffscreenRenderer {
@@ -594,6 +605,22 @@ impl OffscreenRenderer {
         // disjoint field borrows make that legal.
         for (index, additional) in self.additional_renders.iter().enumerate() {
             let batch = &mut self.additional_batches[index];
+
+            // An overlay that reports an unchanged revision cannot draw
+            // anything different, so its retained buffers are still correct and
+            // the whole rebuild is skipped. For overlays whose cost scales with
+            // the structure -- an index group covering the system, a surface
+            // point cloud -- this is the difference between milliseconds of CPU
+            // per frame and nothing at all, on every frame where the user is
+            // only moving the camera.
+            let revision = additional.revision(frame);
+            if batch.built && revision.is_some() && revision == batch.revision {
+                continue;
+            }
+            batch.revision = revision;
+            batch.built = true;
+            batch.needs_upload = true;
+
             batch.scene.clear();
             additional.update_scene(&mut batch.scene, frame);
             batch.pipeline = additional.gpu_pipeline();
@@ -601,27 +628,38 @@ impl OffscreenRenderer {
             batch.vertices.clear();
             append_scene_triangles(&batch.scene, &mut batch.vertices, MAX_RENDER_VERTICES);
 
-            // Free: every vertex is already being touched.
-            batch.bounds = bounds_of(
-                batch
-                    .vertices
-                    .iter()
-                    .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2]))
-                    .chain(batch.scene.sphere_impostors.iter().flat_map(|s| {
-                        let c = Vec3::new(s.center[0], s.center[1], s.center[2]);
-                        let r = Vec3::new(s.radius, s.radius, s.radius);
-                        [c - r, c + r]
-                    })),
-            );
-
-            // Decide the draw phase once, here, instead of rescanning every
-            // vertex and impostor of every batch on every frame.
-            batch.translucent = batch
-                .scene
-                .sphere_impostors
-                .iter()
-                .any(|instance| instance.color[3] < 1.0)
-                || batch.vertices.iter().any(|v| v.color[3] < 1.0);
+            // Bounds (for frustum culling) and the draw phase in one pass over
+            // the geometry, rather than one pass each.
+            let mut bounds: Option<(Vec3, Vec3)> = None;
+            let mut translucent = false;
+            let mut grow = |point: Vec3| match &mut bounds {
+                None => bounds = Some((point, point)),
+                Some((min, max)) => {
+                    min.x = min.x.min(point.x);
+                    min.y = min.y.min(point.y);
+                    min.z = min.z.min(point.z);
+                    max.x = max.x.max(point.x);
+                    max.y = max.y.max(point.y);
+                    max.z = max.z.max(point.z);
+                }
+            };
+            for vertex in &batch.vertices {
+                grow(Vec3::new(
+                    vertex.position[0],
+                    vertex.position[1],
+                    vertex.position[2],
+                ));
+                translucent |= vertex.color[3] < 1.0;
+            }
+            for sphere in &batch.scene.sphere_impostors {
+                let center = Vec3::new(sphere.center[0], sphere.center[1], sphere.center[2]);
+                let radius = Vec3::new(sphere.radius, sphere.radius, sphere.radius);
+                grow(center - radius);
+                grow(center + radius);
+                translucent |= sphere.color[3] < 1.0;
+            }
+            batch.bounds = bounds;
+            batch.translucent = translucent;
         }
 
         // Measured here, before `gpu` takes a mutable borrow of `self`: the
@@ -687,6 +725,13 @@ impl OffscreenRenderer {
         // overlay costs one `write_buffer` instead of creating a buffer per
         // batch per frame from inside the render pass.
         for batch in &mut self.additional_batches {
+            // Only the batches whose CPU geometry actually changed. The rest
+            // still have their previous upload on the GPU.
+            if !batch.needs_upload {
+                continue;
+            }
+            batch.needs_upload = false;
+
             batch.vertex_count = if batch.vertices.is_empty()
                 || batch.pipeline == GpuPipeline::SphereImpostor
             {
@@ -1777,6 +1822,154 @@ mod tests {
         // Indices were invalidated by the clear, so the memo must not hand back
         // a stale one.
         assert_eq!(scene.unit_cylinder_mesh(10), 0);
+    }
+
+    /// The whole point of the revision hook: an overlay that reports an
+    /// unchanged value must not have `update_scene` called again. Without this,
+    /// an index group covering a large system re-derives its geometry on every
+    /// frame the user merely orbits the camera.
+    #[test]
+    fn an_unchanged_overlay_is_not_rebuilt() {
+        use crate::additional_render::AdditionalRender;
+        use crate::render_state::{new_shared_states, set_state_by_type};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        #[allow(dead_code)]
+        struct Marker(u32);
+
+        struct Counting(Arc<AtomicUsize>);
+        impl AdditionalRender for Counting {
+            fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+                frame.overlay_revision::<Marker>()
+            }
+            fn update_scene(&self, _scene: &mut Scene, _frame: &RenderFrameState<'_>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let states = new_shared_states();
+        set_state_by_type(&states, Marker(0));
+        let molecule = molecule_with(3);
+        let viewer = {
+            let mut viewer = MoleculeViewer::new();
+            viewer.set_molecule(molecule_with(3));
+            viewer
+        };
+
+        macro_rules! frame {
+            () => {
+                RenderFrameState::new(
+                    Some(&molecule),
+                    [0.0; 16],
+                    None,
+                    1.0,
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    default_color_fn,
+                    Some(&states),
+                    RenderStyle::BallStick,
+                    16,
+                    false,
+                    1.0,
+                )
+                .with_geometry_revision(viewer.revision())
+            };
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let overlay = Counting(Arc::clone(&calls));
+
+        // Same inputs twice: the second frame must reuse the first's geometry.
+        let first = overlay.revision(&frame!());
+        let second = overlay.revision(&frame!());
+        assert!(first.is_some());
+        assert_eq!(first, second, "nothing changed, so the revision must not");
+
+        // Touching the state has to invalidate it.
+        set_state_by_type(&states, Marker(1));
+        assert_ne!(first, overlay.revision(&frame!()));
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "asking for a revision must not build geometry"
+        );
+    }
+
+    /// The revision has to cover every input `update_scene` can read, not just
+    /// the overlay's own state -- an overlay that follows atom positions would
+    /// otherwise freeze during trajectory playback.
+    #[test]
+    fn the_overlay_revision_tracks_the_molecule_and_the_render_settings() {
+        use crate::render_state::{new_shared_states, set_state_by_type};
+
+        #[derive(Clone)]
+        struct Marker;
+
+        let states = new_shared_states();
+        set_state_by_type(&states, Marker);
+        let molecule = molecule_with(3);
+
+        let build = |geometry_revision: u64, style: RenderStyle, resolution: usize, low: bool| {
+            RenderFrameState::new(
+                Some(&molecule),
+                [0.0; 16],
+                None,
+                1.0,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                default_color_fn,
+                Some(&states),
+                style,
+                resolution,
+                low,
+                1.0,
+            )
+            .with_geometry_revision(geometry_revision)
+            .overlay_revision::<Marker>()
+        };
+
+        let base = build(1, RenderStyle::BallStick, 16, false);
+        assert!(base.is_some());
+
+        assert_eq!(base, build(1, RenderStyle::BallStick, 16, false));
+        assert_ne!(base, build(2, RenderStyle::BallStick, 16, false), "molecule");
+        assert_ne!(base, build(1, RenderStyle::Wireframe, 16, false), "style");
+        assert_ne!(base, build(1, RenderStyle::BallStick, 24, false), "resolution");
+        assert_ne!(base, build(1, RenderStyle::BallStick, 16, true), "low mode");
+    }
+
+    /// An overlay with no state stored cannot be cached, and must fall back to
+    /// rebuilding rather than to a constant.
+    #[test]
+    fn an_absent_state_reports_no_revision() {
+        use crate::render_state::new_shared_states;
+
+        #[derive(Clone)]
+        struct NeverSet;
+
+        let states = new_shared_states();
+        let molecule = molecule_with(1);
+        let frame = RenderFrameState::new(
+            Some(&molecule),
+            [0.0; 16],
+            None,
+            1.0,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            default_color_fn,
+            Some(&states),
+            RenderStyle::BallStick,
+            16,
+            false,
+            1.0,
+        );
+        assert_eq!(frame.overlay_revision::<NeverSet>(), None);
     }
 
     /// A frame assembled by hand, without `with_geometry_revision`, must never

@@ -70,6 +70,14 @@ impl Default for PointCloudRender {
 }
 
 impl AdditionalRender for PointCloudRender {
+    /// One cross per point, and a solvent-accessible surface is hundreds of
+    /// thousands of them -- so re-deriving this on every frame the camera
+    /// merely moved is real CPU time. Reporting a revision lets the renderer
+    /// keep what it has.
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<PointCloudState>()
+    }
+
     fn gpu_pipeline(&self) -> GpuPipeline {
         GpuPipeline::Wireframe
     }
