@@ -542,7 +542,7 @@ mod tests {
             "nothing is there until the cell is replicated"
         );
 
-        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 0, 0])));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [3, 1, 1])));
         assert!(
             matches!(
                 viewer.pick(origin, direction),
@@ -561,7 +561,7 @@ mod tests {
             vec![atom_at(0.0, 0.0, 0.0, 0), atom_at(0.0, 0.0, 3.0, 1)],
             Vec::new(),
         ));
-        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [0, 0, 1])));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 1, 3])));
 
         // Looking down -z from far away: atom 1 (z = 3) is nearest.
         let picked = viewer.pick(Vec3::new(0.0, 0.0, 40.0), Vec3::new(0.0, 0.0, -1.0));
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn hidden_atoms_stay_unclickable_in_every_image() {
         let mut viewer = one_atom_viewer();
-        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 0, 0])));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [3, 1, 1])));
         viewer.set_visible_atoms(Some(vec![false]));
 
         let origin = Vec3::new(10.0, 0.0, 5.0);
@@ -588,12 +588,12 @@ mod tests {
         let mut viewer = one_atom_viewer();
         let before = viewer.revision();
 
-        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 1, 1])));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [3, 3, 3])));
         assert_ne!(before, viewer.revision());
         assert!(viewer.periodic_images().is_some());
 
         // A replication that draws nothing extra is not worth carrying.
-        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [0, 0, 0])));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 1, 1])));
         assert!(viewer.periodic_images().is_none());
     }
 
@@ -610,7 +610,7 @@ mod tests {
                 order: 1,
             }],
         ));
-        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [0, 1, 0])));
+        viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 3, 1])));
 
         // Aim at the midpoint of the +y replica's bond, which lies between its
         // two atoms and so can only be a bond hit.
