@@ -67,15 +67,15 @@ pub(super) fn build_ballstick_vertices(
         };
 
     let max_vertices = MAX_RENDER_VERTICES;
+    // Reserve what this build will actually emit, not a per-atom rule of thumb.
+    // The old estimate (200 vertices per atom) overshot the real cost by ~2x at
+    // the default mesh resolution and saturated at `MAX_RENDER_VERTICES` above
+    // ~31k atoms -- a flat 240 MB `Vec` allocated and zeroed on every geometry
+    // rebuild, which during trajectory playback means every frame.
+    // `estimate_ballstick_vertices` is the same count `pick_ballstick_quality`
+    // already computes to choose the quality level.
     let mut vertices = if let Some(mol) = molecule {
-        let capacity = mol
-            .bonds
-            .len()
-            .saturating_mul(50)
-            .saturating_add(mol.atoms.len().saturating_mul(200))
-            .saturating_add(225)
-            .min(max_vertices);
-        Vec::with_capacity(capacity)
+        Vec::with_capacity(estimate_ballstick_vertices(context, mol, quality).min(max_vertices))
     } else {
         Vec::with_capacity(225.min(max_vertices))
     };
