@@ -246,6 +246,22 @@ impl InteractiveMoleculeViewport {
         self.viewer.set_molecule(molecule);
     }
 
+    /// The molecule currently displayed. See [`MoleculeViewer::molecule`].
+    pub fn molecule(&self) -> Option<&Molecule> {
+        self.viewer.molecule()
+    }
+
+    /// Mutable access to the displayed molecule, bumping the render revision.
+    /// See [`MoleculeViewer::molecule_mut`].
+    pub fn molecule_mut(&mut self) -> Option<&mut Molecule> {
+        self.viewer.molecule_mut()
+    }
+
+    /// Take the molecule back out, leaving the viewport empty.
+    pub fn take_molecule(&mut self) -> Option<Molecule> {
+        self.viewer.take_molecule()
+    }
+
     /// Update atom positions in place for trajectory playback (nanometer
     /// units). See [`MoleculeViewer::update_positions`].
     pub fn update_positions(&mut self, positions: &[Vec3]) -> Result<(), String> {

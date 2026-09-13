@@ -1147,7 +1147,8 @@ impl OffscreenRenderer {
             if out.len() >= MAX_IMPOSTOR_INSTANCES {
                 break;
             }
-            if !frame.is_atom_visible(bond.atom_a) || !frame.is_atom_visible(bond.atom_b) {
+            let (index_a, index_b) = bond.endpoints();
+            if !frame.is_atom_visible(index_a) || !frame.is_atom_visible(index_b) {
                 continue;
             }
             let Some((a, b)) = mol.bond_endpoints(bond) else {
@@ -1604,11 +1605,8 @@ mod tests {
     fn molecule_with(atom_count: usize) -> Molecule {
         Molecule::from_atoms_bonds(
             (0..atom_count)
-                .map(|i| Atom {
-                    position: Vec3::new(i as f32 * 0.15, 0.0, 0.0),
-                    element: Element::new("C"),
-                    id: i,
-                    meta: None,
+                .map(|i| {
+                    Atom::new(Vec3::new(i as f32 * 0.15, 0.0, 0.0), Element::new("C"))
                 })
                 .collect(),
             Vec::new(),

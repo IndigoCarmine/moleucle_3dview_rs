@@ -249,19 +249,10 @@ mod tests {
     /// A short chain: atoms in a line, bonded to their neighbour.
     fn chain(count: usize) -> Molecule {
         let atoms = (0..count)
-            .map(|i| Atom {
-                position: Vec3::new(i as f32 * 0.15, 0.0, 0.0),
-                element: Element::new("C"),
-                id: i,
-                meta: None,
-            })
+            .map(|i| Atom::new(Vec3::new(i as f32 * 0.15, 0.0, 0.0), Element::new("C")))
             .collect();
         let bonds = (0..count.saturating_sub(1))
-            .map(|i| Bond {
-                atom_a: i,
-                atom_b: i + 1,
-                order: 1,
-            })
+            .map(|i| Bond::new(i, i + 1, 1))
             .collect();
         Molecule::from_atoms_bonds(atoms, bonds)
     }

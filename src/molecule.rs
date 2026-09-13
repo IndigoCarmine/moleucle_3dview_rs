@@ -64,94 +64,176 @@ impl From<&str> for Element {
     }
 }
 
-/// Optional PDB-specific attributes. Boxed behind `Atom::meta` so a minimal
-/// atom (MOL2, or any source without these fields) stays small and so the
-/// per-frame render loops iterate a tight `Atom` array instead of paying for
-/// seven mostly-empty `Option`s inline.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct AtomMeta {
-    pub name: Option<String>,     // Atom identifier (e.g., "CA", "C00")
-    pub res_name: Option<String>, // Residue name (e.g., "ALA")
-    pub chain_id: Option<char>,   // Chain identifier (e.g., 'A')
-    pub res_seq: Option<i32>,     // Residue sequence number
-    pub occupancy: Option<f32>,   // Occupancy factor (0.0-1.0)
-    pub temp_factor: Option<f32>, // Temperature factor
-    pub charge: Option<String>,   // Formal charge
+/// An interned name: an index into a [`Molecule`]'s [`SymbolTable`].
+///
+/// Atom and residue names come from a handful of distinct strings repeated
+/// across the whole system ("OW", "SOL", "CA", "ALA"). Storing an index rather
+/// than a `String` per atom is what keeps [`Atom`] a 32-byte `Copy` value with
+/// no heap allocation of its own: a solvated 200k-atom system paid ~110 bytes
+/// and three allocations per atom for names alone before this.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct SymbolId(u32);
+
+impl SymbolId {
+    /// No name at all — distinct from an interned empty string, which a source
+    /// that writes a blank field still produces.
+    pub const NONE: SymbolId = SymbolId(u32::MAX);
+
+    pub fn is_none(self) -> bool {
+        self == Self::NONE
+    }
 }
 
-#[derive(Debug, Clone)]
+impl Default for SymbolId {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+/// The distinct name strings of one molecule, each stored once.
+///
+/// Built as atoms are pushed through [`MoleculeBuilder`] and then read-only for
+/// the molecule's lifetime. `index` exists only to deduplicate during the build;
+/// it is kept afterwards so a molecule can still be extended, and costs nothing
+/// worth reclaiming — a system of any size has at most a few hundred distinct
+/// atom and residue names.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SymbolTable {
+    symbols: Vec<Box<str>>,
+    index: std::collections::HashMap<Box<str>, SymbolId>,
+}
+
+impl SymbolTable {
+    /// Intern `text`, returning the id it is stored under. Repeated calls with
+    /// the same text return the same id and allocate nothing.
+    pub fn intern(&mut self, text: &str) -> SymbolId {
+        if let Some(&id) = self.index.get(text) {
+            return id;
+        }
+        let id = SymbolId(self.symbols.len() as u32);
+        let boxed: Box<str> = text.into();
+        self.symbols.push(boxed.clone());
+        self.index.insert(boxed, id);
+        id
+    }
+
+    /// The text behind `id`, or `None` for [`SymbolId::NONE`] (and for an id
+    /// from a different molecule's table, which is out of range here).
+    pub fn resolve(&self, id: SymbolId) -> Option<&str> {
+        self.symbols.get(id.0 as usize).map(|s| &**s)
+    }
+
+    /// How many distinct strings are interned.
+    pub fn len(&self) -> usize {
+        self.symbols.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+    }
+}
+
+/// Optional per-atom attributes, as handed to [`MoleculeBuilder::push`].
+///
+/// Transient and borrowed, never stored: the builder interns the strings into
+/// the molecule's [`SymbolTable`] and packs the rest into the atom itself, so a
+/// parser can pass slices of the line it is already holding and nothing here
+/// outlives the call.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AtomMeta<'a> {
+    pub name: Option<&'a str>,     // Atom identifier (e.g., "CA", "C00")
+    pub res_name: Option<&'a str>, // Residue name (e.g., "ALA")
+    pub chain_id: Option<char>,    // Chain identifier (e.g., 'A')
+    pub res_seq: Option<i32>,      // Residue sequence number
+    pub occupancy: Option<f32>,    // Occupancy factor (0.0-1.0)
+    pub temp_factor: Option<f32>,  // Temperature factor
+    pub charge: Option<&'a str>,   // Formal charge
+}
+
+/// One atom: 32 bytes, `Copy`, and with no heap allocation of its own.
+///
+/// Names live in the owning [`Molecule`]'s [`SymbolTable`], so reading them
+/// goes through the molecule ([`Molecule::name_of`], [`Molecule::res_name_of`])
+/// rather than the atom. The two attributes that fit inline — the residue
+/// sequence number and the chain id — are answered by [`Atom`] directly. The
+/// three PDB-only floats/strings (occupancy, temperature factor, formal charge)
+/// sit in columns on the molecule that stay empty for sources that have none.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Atom {
     pub position: Vec3,
+    /// Residue sequence number, or [`Atom::NO_RES_SEQ`] when the source had none.
+    res_seq: i32,
     pub element: Element,
-    pub id: usize,
-    /// PDB-specific attributes, present only when a source provides them.
-    pub meta: Option<Box<AtomMeta>>,
+    name: SymbolId,
+    res_name: SymbolId,
+    /// Chain identifier as one ASCII byte; `0` when the source had none.
+    chain_id: u8,
 }
 
 impl Atom {
-    pub fn name(&self) -> Option<&str> {
-        self.meta.as_ref().and_then(|m| m.name.as_deref())
+    /// Sentinel stored in `res_seq` for "no residue number". `i32::MIN` is not a
+    /// value any coordinate format can express in its residue field.
+    const NO_RES_SEQ: i32 = i32::MIN;
+
+    /// An atom with only a position and an element — no names, no residue.
+    /// The minimal atom a caller can synthesize without a [`MoleculeBuilder`].
+    pub fn new(position: Vec3, element: Element) -> Self {
+        Atom {
+            position,
+            res_seq: Self::NO_RES_SEQ,
+            element,
+            name: SymbolId::NONE,
+            res_name: SymbolId::NONE,
+            chain_id: 0,
+        }
     }
 
-    pub fn res_name(&self) -> Option<&str> {
-        self.meta.as_ref().and_then(|m| m.res_name.as_deref())
+    /// This atom's interned name id. Resolve it against the owning molecule's
+    /// [`Molecule::symbols`]; [`Molecule::name_of`] does both in one step.
+    pub fn name_id(&self) -> SymbolId {
+        self.name
+    }
+
+    /// This atom's interned residue-name id. See [`Molecule::res_name_of`].
+    pub fn res_name_id(&self) -> SymbolId {
+        self.res_name
     }
 
     pub fn chain_id(&self) -> Option<char> {
-        self.meta.as_ref().and_then(|m| m.chain_id)
+        (self.chain_id != 0).then_some(self.chain_id as char)
     }
 
     pub fn res_seq(&self) -> Option<i32> {
-        self.meta.as_ref().and_then(|m| m.res_seq)
-    }
-
-    pub fn occupancy(&self) -> Option<f32> {
-        self.meta.as_ref().and_then(|m| m.occupancy)
-    }
-
-    pub fn temp_factor(&self) -> Option<f32> {
-        self.meta.as_ref().and_then(|m| m.temp_factor)
-    }
-
-    pub fn charge(&self) -> Option<&str> {
-        self.meta.as_ref().and_then(|m| m.charge.as_deref())
-    }
-
-    /// Build an atom from a parsed PDB record, moving its owned strings instead
-    /// of cloning them. `id` is the atom's 0-based index.
-    fn from_record(id: usize, record: AtomRecord) -> Self {
-        let element = Element::new(&extract_element_symbol(&record.element, &record.name));
-        let chain_id = (record.chain_id != ' ').then_some(record.chain_id);
-        let occupancy = (record.occupancy > 0.0).then_some(record.occupancy);
-        let temp_factor = (record.temp_factor > 0.0).then_some(record.temp_factor);
-        let charge = (!record.charge.is_empty()).then_some(record.charge);
-
-        Atom {
-            position: Vec3::new(
-                record.x * ANGSTROM_TO_NANOMETER,
-                record.y * ANGSTROM_TO_NANOMETER,
-                record.z * ANGSTROM_TO_NANOMETER,
-            ),
-            element,
-            id,
-            meta: Some(Box::new(AtomMeta {
-                name: Some(record.name),
-                res_name: Some(record.res_name),
-                chain_id,
-                res_seq: Some(record.res_seq),
-                occupancy,
-                temp_factor,
-                charge,
-            })),
-        }
+        (self.res_seq != Self::NO_RES_SEQ).then_some(self.res_seq)
     }
 }
 
-#[derive(Debug, Clone)]
+/// One bond: 12 bytes. The endpoints are `u32` because a bond list is as long
+/// as the atom list on a fully-bonded system, and no coordinate format can
+/// address more than 4 billion atoms — `usize` endpoints doubled the cost of
+/// every bond for range nobody can reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bond {
-    pub atom_a: usize,
-    pub atom_b: usize,
+    pub atom_a: u32,
+    pub atom_b: u32,
     pub order: u8,
+}
+
+impl Bond {
+    /// A single bond between two 0-based atom indices.
+    pub fn new(atom_a: usize, atom_b: usize, order: u8) -> Self {
+        Bond {
+            atom_a: atom_a as u32,
+            atom_b: atom_b as u32,
+            order,
+        }
+    }
+
+    /// The endpoints as indices into [`Molecule::atoms`].
+    #[inline]
+    pub fn endpoints(&self) -> (usize, usize) {
+        (self.atom_a as usize, self.atom_b as usize)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -236,6 +318,14 @@ impl AtomRecord {
 pub struct Molecule {
     pub atoms: Vec<Atom>,
     pub bonds: Vec<Bond>,
+    /// Every distinct atom/residue/charge string in this molecule, stored once.
+    symbols: SymbolTable,
+    /// PDB-only per-atom columns. Empty unless the source carried the field, in
+    /// which case there is one entry per atom. Keeping them out of [`Atom`] is
+    /// what lets a GRO or MOL2 system pay nothing for fields it does not have.
+    occupancy: Vec<f32>,
+    temp_factor: Vec<f32>,
+    charge: Vec<SymbolId>,
     /// Bumped whenever atom positions change in place (e.g. trajectory
     /// playback). Renderers key their cached GPU geometry on this so they
     /// rebuild when the same `Molecule` is mutated rather than replaced.
@@ -246,6 +336,52 @@ impl Molecule {
     /// Monotonic counter that changes whenever positions are updated in place.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// This molecule's interned strings. Needed to turn an [`Atom`]'s
+    /// [`SymbolId`] into text; [`Self::name_of`] and [`Self::res_name_of`] are
+    /// the usual way in.
+    pub fn symbols(&self) -> &SymbolTable {
+        &self.symbols
+    }
+
+    /// The atom's name, or `None` when its source carried none.
+    pub fn name_of(&self, atom: &Atom) -> Option<&str> {
+        self.symbols.resolve(atom.name)
+    }
+
+    /// The atom's residue name, or `None` when its source carried none.
+    pub fn res_name_of(&self, atom: &Atom) -> Option<&str> {
+        self.symbols.resolve(atom.res_name)
+    }
+
+    /// The name of the atom at `index`, or `None` when it has none or the index
+    /// is out of range.
+    pub fn atom_name(&self, index: usize) -> Option<&str> {
+        self.name_of(self.atoms.get(index)?)
+    }
+
+    /// The residue name of the atom at `index`. See [`Self::atom_name`].
+    pub fn atom_res_name(&self, index: usize) -> Option<&str> {
+        self.res_name_of(self.atoms.get(index)?)
+    }
+
+    /// Occupancy of the atom at `index`, for sources that record one. Matches
+    /// the PDB convention that a non-positive occupancy means "not stated".
+    pub fn occupancy(&self, index: usize) -> Option<f32> {
+        self.occupancy.get(index).copied().filter(|v| *v > 0.0)
+    }
+
+    /// Temperature (B) factor of the atom at `index`, where one was recorded.
+    pub fn temp_factor(&self, index: usize) -> Option<f32> {
+        self.temp_factor.get(index).copied().filter(|v| *v > 0.0)
+    }
+
+    /// Formal charge of the atom at `index` as written by its source (e.g.
+    /// `"1+"`), where one was recorded.
+    pub fn charge(&self, index: usize) -> Option<&str> {
+        let id = self.charge.get(index).copied()?;
+        self.symbols.resolve(id).filter(|s| !s.is_empty())
     }
 
     /// Replace every atom's position in place, leaving elements, bonds, ids and
@@ -300,12 +436,27 @@ impl Molecule {
     /// node-graph builder assembling atoms from its own model — need a way to
     /// construct a `Molecule` without round-tripping through a file. Positions
     /// are taken as-is (the crate's nanometer convention); `bonds` may be empty.
+    /// Atoms built this way carry no names (see [`Atom::new`]); use
+    /// [`Molecule::builder`] when the caller has residue or atom names to keep.
     pub fn from_atoms_bonds(atoms: Vec<Atom>, bonds: Vec<Bond>) -> Self {
         Self {
             atoms,
             bonds,
-            generation: 0,
+            ..Self::default()
         }
+    }
+
+    /// Start building a molecule whose atoms carry names.
+    ///
+    /// The builder owns the [`SymbolTable`], so every name is interned as it is
+    /// pushed and the finished molecule holds one copy of each distinct string.
+    pub fn builder() -> MoleculeBuilder {
+        MoleculeBuilder::default()
+    }
+
+    /// A builder with room for `atoms` atoms reserved up front.
+    pub fn builder_with_capacity(atoms: usize) -> MoleculeBuilder {
+        MoleculeBuilder::with_capacity(atoms)
     }
 
     /// Like [`from_atoms_bonds`](Self::from_atoms_bonds) but infers bonds from
@@ -331,11 +482,7 @@ impl Molecule {
                 let dist_sq = d.magnitude_squared();
                 // Guard against coincident atoms producing spurious zero-length bonds.
                 if dist_sq > 1e-8 && dist_sq < cutoff_sq {
-                    bonds.push(Bond {
-                        atom_a: i,
-                        atom_b: j,
-                        order: 1,
-                    });
+                    bonds.push(Bond::new(i, j, 1));
                 }
             });
         }
@@ -353,9 +500,8 @@ impl Molecule {
     /// case degrades to a missing stick instead of panicking mid-repaint.
     #[inline]
     pub fn bond_endpoints(&self, bond: &Bond) -> Option<(Vec3, Vec3)> {
-        let a = self.atoms.get(bond.atom_a)?.position;
-        let b = self.atoms.get(bond.atom_b)?.position;
-        Some((a, b))
+        let (a, b) = bond.endpoints();
+        Some((self.atoms.get(a)?.position, self.atoms.get(b)?.position))
     }
 
     /// Report the bonds whose endpoints are out of range, as `(index, bond)`.
@@ -368,7 +514,10 @@ impl Molecule {
         self.bonds
             .iter()
             .enumerate()
-            .filter(move |(_, bond)| bond.atom_a >= atom_count || bond.atom_b >= atom_count)
+            .filter(move |(_, bond)| {
+                let (a, b) = bond.endpoints();
+                a >= atom_count || b >= atom_count
+            })
     }
 
     pub fn center(&self) -> Vec3 {
@@ -440,20 +589,14 @@ impl Molecule {
                                 .map(|s| s.to_uppercase())
                                 .unwrap_or_else(|| "?".to_string());
 
-                            atoms.push(Atom {
-                                position: Vec3::new(
+                            atoms.push(Atom::new(
+                                Vec3::new(
                                     x * ANGSTROM_TO_NANOMETER,
                                     y * ANGSTROM_TO_NANOMETER,
                                     z * ANGSTROM_TO_NANOMETER,
                                 ),
-                                element: Element::new(&element),
-                                // 0-based, matching the PDB and GRO loaders and
-                                // the atom's own index in `atoms`. MOL2 numbers
-                                // atoms from 1 in the file; that stays in the
-                                // file.
-                                id: atoms.len(),
-                                meta: None,
-                            });
+                                Element::new(&element),
+                            ));
                         }
                     }
                 }
@@ -476,11 +619,7 @@ impl Molecule {
 
                         // Adjust 1-based to 0-based
                         if a_id > 0 && b_id > 0 && a_id <= atoms.len() && b_id <= atoms.len() {
-                            bonds.push(Bond {
-                                atom_a: a_id - 1,
-                                atom_b: b_id - 1,
-                                order,
-                            });
+                            bonds.push(Bond::new(a_id - 1, b_id - 1, order));
                         }
                     }
                 }
@@ -491,7 +630,7 @@ impl Molecule {
         Ok(Molecule {
             atoms,
             bonds,
-            generation: 0,
+            ..Molecule::default()
         })
     }
 
@@ -503,7 +642,7 @@ impl Molecule {
         // Parse directly into Atoms so the per-record strings are moved once
         // rather than cloned into a second vector; no intermediate
         // Vec<AtomRecord> is kept alive, halving peak memory for large files.
-        let mut atoms: Vec<Atom> = Vec::new();
+        let mut builder = Molecule::builder();
         let mut conect_bonds = Vec::with_capacity(256);
 
         // PDB is a fixed-column format, so every field here is a byte range.
@@ -514,7 +653,7 @@ impl Molecule {
             match line.get(..std::cmp::min(6, line.len())) {
                 Some("ATOM  ") | Some("HETATM") => {
                     if let Some(record) = AtomRecord::from_line(line) {
-                        atoms.push(Atom::from_record(atoms.len(), record));
+                        push_pdb_record(&mut builder, &record);
                     }
                 }
                 Some("CONECT") => {
@@ -548,27 +687,18 @@ impl Molecule {
         }
 
         // Use explicit bonds if available, otherwise infer from distances
-        let bonds = if !conect_bonds.is_empty() {
-            let mut result = Vec::with_capacity(conect_bonds.len());
-            for (a, b) in conect_bonds {
-                if a < atoms.len() && b < atoms.len() {
-                    result.push(Bond {
-                        atom_a: a,
-                        atom_b: b,
-                        order: 1,
-                    });
-                }
-            }
-            result
-        } else {
-            Self::infer_bonds(&atoms)
-        };
+        if conect_bonds.is_empty() {
+            return Ok(builder.finish_with_inferred_bonds());
+        }
 
-        Ok(Molecule {
-            atoms,
-            bonds,
-            generation: 0,
-        })
+        let atom_count = builder.len();
+        let mut bonds = Vec::with_capacity(conect_bonds.len());
+        for (a, b) in conect_bonds {
+            if a < atom_count && b < atom_count {
+                bonds.push(Bond::new(a, b, 1));
+            }
+        }
+        Ok(builder.finish(bonds))
     }
 
     /// Load a molecule, dispatching on the file extension: `.gro` (GROMACS),
@@ -645,18 +775,16 @@ impl Molecule {
             let y: f32 = parse_gro_coord(nums.next(), i)?;
             let z: f32 = parse_gro_coord(nums.next(), i)?;
 
-            atoms.push(Atom {
-                position: Vec3::new(x, y, z),
-                element: Element::new(&element_from_gro_name(name)),
-                id: i,
-                meta: None,
-            });
+            atoms.push(Atom::new(
+                Vec3::new(x, y, z),
+                Element::new(&element_from_gro_name(name)),
+            ));
         }
 
         Ok(Molecule {
             atoms,
             bonds: Vec::new(),
-            generation: 0,
+            ..Molecule::default()
         })
     }
 
@@ -711,17 +839,146 @@ impl Molecule {
                 let max_dist_sq = expected_dist * expected_dist * BOND_DISTANCE_FACTOR_SQ;
 
                 if dist_sq < max_dist_sq {
-                    bonds.push(Bond {
-                        atom_a: i,
-                        atom_b: j,
-                        order: 1,
-                    });
+                    bonds.push(Bond::new(i, j, 1));
                 }
             });
         }
 
         bonds
     }
+}
+
+/// Assembles a [`Molecule`] atom by atom, interning names as it goes.
+///
+/// Parsers push one atom at a time with a borrowed [`AtomMeta`]; the builder
+/// interns the strings into the molecule's shared [`SymbolTable`] and
+/// materializes the PDB-only columns only if some atom actually supplies them.
+/// A GRO or MOL2 system therefore never allocates for occupancy, temperature
+/// factor or charge at all.
+#[derive(Debug, Default)]
+pub struct MoleculeBuilder {
+    mol: Molecule,
+}
+
+impl MoleculeBuilder {
+    pub fn with_capacity(atoms: usize) -> Self {
+        Self {
+            mol: Molecule {
+                atoms: Vec::with_capacity(atoms),
+                ..Molecule::default()
+            },
+        }
+    }
+
+    /// Append one atom, returning its 0-based index.
+    pub fn push(&mut self, position: Vec3, element: &str, meta: &AtomMeta<'_>) -> usize {
+        let index = self.mol.atoms.len();
+        let name = match meta.name {
+            Some(text) => self.mol.symbols.intern(text),
+            None => SymbolId::NONE,
+        };
+        let res_name = match meta.res_name {
+            Some(text) => self.mol.symbols.intern(text),
+            None => SymbolId::NONE,
+        };
+        // A chain id is one ASCII character by the PDB spec; anything else (and
+        // the blank field a parser reports as `None`) becomes "no chain".
+        let chain_id = meta
+            .chain_id
+            .filter(|c| c.is_ascii() && *c != '\0')
+            .map(|c| c as u8)
+            .unwrap_or(0);
+
+        self.mol.atoms.push(Atom {
+            position,
+            res_seq: meta.res_seq.unwrap_or(Atom::NO_RES_SEQ),
+            element: Element::new(element),
+            name,
+            res_name,
+            chain_id,
+        });
+
+        // The three optional columns stay empty until an atom supplies one, at
+        // which point the earlier atoms are backfilled with "not stated".
+        if let Some(occupancy) = meta.occupancy {
+            self.mol.occupancy.resize(index, 0.0);
+            self.mol.occupancy.push(occupancy);
+        } else if !self.mol.occupancy.is_empty() {
+            self.mol.occupancy.push(0.0);
+        }
+        if let Some(temp_factor) = meta.temp_factor {
+            self.mol.temp_factor.resize(index, 0.0);
+            self.mol.temp_factor.push(temp_factor);
+        } else if !self.mol.temp_factor.is_empty() {
+            self.mol.temp_factor.push(0.0);
+        }
+        if let Some(charge) = meta.charge {
+            let id = self.mol.symbols.intern(charge);
+            self.mol.charge.resize(index, SymbolId::NONE);
+            self.mol.charge.push(id);
+        } else if !self.mol.charge.is_empty() {
+            self.mol.charge.push(SymbolId::NONE);
+        }
+
+        index
+    }
+
+    /// The atoms pushed so far, for callers that need to infer connectivity
+    /// from geometry before finishing.
+    pub fn atoms(&self) -> &[Atom] {
+        &self.mol.atoms
+    }
+
+    pub fn len(&self) -> usize {
+        self.mol.atoms.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mol.atoms.is_empty()
+    }
+
+    /// Intern a string into the molecule being built, for callers that keep
+    /// their own name ids alongside the atoms.
+    pub fn intern(&mut self, text: &str) -> SymbolId {
+        self.mol.symbols.intern(text)
+    }
+
+    /// Finish with an explicit bond list.
+    pub fn finish(mut self, bonds: Vec<Bond>) -> Molecule {
+        self.mol.bonds = bonds;
+        self.mol
+    }
+
+    /// Finish with bonds inferred from van der Waals radii, the way
+    /// [`Molecule::from_pdb`] does when a file has no CONECT records.
+    pub fn finish_with_inferred_bonds(mut self) -> Molecule {
+        self.mol.bonds = Molecule::infer_bonds(&self.mol.atoms);
+        self.mol
+    }
+}
+
+/// Push one parsed PDB record onto `builder`, applying the PDB conventions for
+/// "field not stated" (a blank chain, a non-positive occupancy or B-factor, an
+/// empty charge) so those never reach the molecule's optional columns.
+fn push_pdb_record(builder: &mut MoleculeBuilder, record: &AtomRecord) {
+    let element = extract_element_symbol(&record.element, &record.name);
+    builder.push(
+        Vec3::new(
+            record.x * ANGSTROM_TO_NANOMETER,
+            record.y * ANGSTROM_TO_NANOMETER,
+            record.z * ANGSTROM_TO_NANOMETER,
+        ),
+        &element,
+        &AtomMeta {
+            name: Some(record.name.as_str()),
+            res_name: Some(record.res_name.as_str()),
+            chain_id: (record.chain_id != ' ').then_some(record.chain_id),
+            res_seq: Some(record.res_seq),
+            occupancy: (record.occupancy > 0.0).then_some(record.occupancy),
+            temp_factor: (record.temp_factor > 0.0).then_some(record.temp_factor),
+            charge: (!record.charge.is_empty()).then_some(record.charge.as_str()),
+        },
+    );
 }
 
 fn parse_gro_coord(field: Option<&str>, atom_index: usize) -> Result<f32, String> {
@@ -777,12 +1034,7 @@ mod tests {
     use super::*;
 
     fn atom_at(element: &str, x: f32, y: f32, z: f32) -> Atom {
-        Atom {
-            position: Vec3::new(x, y, z),
-            element: Element::new(element),
-            id: 0,
-            meta: None,
-        }
+        Atom::new(Vec3::new(x, y, z), Element::new(element))
     }
 
     /// Original O(n^2) reference implementation, kept only for the test.
@@ -800,11 +1052,7 @@ mod tests {
                 }
                 let expected = radius_i + vdw_radius(&atoms[j].element);
                 if dist_sq < expected * expected * FACTOR_SQ {
-                    bonds.push(Bond {
-                        atom_a: i,
-                        atom_b: j,
-                        order: 1,
-                    });
+                    bonds.push(Bond::new(i, j, 1));
                 }
             }
         }
@@ -812,8 +1060,7 @@ mod tests {
     }
 
     fn sorted_pairs(bonds: &[Bond]) -> Vec<(usize, usize)> {
-        let mut pairs: Vec<(usize, usize)> =
-            bonds.iter().map(|b| (b.atom_a, b.atom_b)).collect();
+        let mut pairs: Vec<(usize, usize)> = bonds.iter().map(Bond::endpoints).collect();
         pairs.sort_unstable();
         pairs
     }
@@ -878,23 +1125,11 @@ mod tests {
         let mol = Molecule::from_atoms_bonds(
             vec![atom_at("C", 0.0, 0.0, 0.0), atom_at("O", 0.12, 0.0, 0.0)],
             vec![
-                Bond {
-                    atom_a: 0,
-                    atom_b: 1,
-                    order: 1,
-                },
+                Bond::new(0, 1, 1),
                 // Topology and coordinates disagreeing on the atom count is a
                 // routine input, not a caller bug -- it must not panic.
-                Bond {
-                    atom_a: 0,
-                    atom_b: 99,
-                    order: 1,
-                },
-                Bond {
-                    atom_a: usize::MAX,
-                    atom_b: 0,
-                    order: 1,
-                },
+                Bond::new(0, 99, 1),
+                Bond::new(u32::MAX as usize, 0, 1),
             ],
         );
 
@@ -942,12 +1177,8 @@ mod tests {
     fn set_positions_updates_in_place_and_bumps_generation() {
         let mut mol = Molecule {
             atoms: vec![atom_at("C", 0.0, 0.0, 0.0), atom_at("O", 1.0, 0.0, 0.0)],
-            bonds: vec![Bond {
-                atom_a: 0,
-                atom_b: 1,
-                order: 1,
-            }],
-            generation: 0,
+            bonds: vec![Bond::new(0, 1, 1)],
+            ..Molecule::default()
         };
 
         let new_pos = [Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0)];
@@ -966,11 +1197,12 @@ mod tests {
 
     #[test]
     fn set_positions_rejects_length_mismatch() {
-        let mut mol = Molecule {
-            atoms: vec![atom_at("C", 0.0, 0.0, 0.0)],
-            bonds: Vec::new(),
-            generation: 5,
-        };
+        let mut mol =
+            Molecule::from_atoms_bonds(vec![atom_at("C", 0.0, 0.0, 0.0)], Vec::new());
+        // Five in-place updates, so the generation counter is non-zero.
+        for _ in 0..5 {
+            mol.set_positions(&[Vec3::new(0.0, 0.0, 0.0)]).unwrap();
+        }
         assert!(mol.set_positions(&[]).is_err());
         // Unchanged on error.
         assert_eq!(mol.generation(), 5);
@@ -1001,7 +1233,8 @@ mod tests {
         assert_eq!(mol.atoms[1].element.as_str(), "O");
         // No bonds inferred, no per-atom metadata retained.
         assert!(mol.bonds.is_empty());
-        assert!(mol.atoms[0].meta.is_none());
+        assert!(mol.atom_name(0).is_none());
+        assert!(mol.atom_res_name(0).is_none());
     }
 
     #[test]
@@ -1026,7 +1259,7 @@ mod tests {
         let mut mol = Molecule {
             atoms: vec![atom_at("C", 0.0, 0.0, 0.0)],
             bonds: Vec::new(),
-            generation: 0,
+            ..Molecule::default()
         };
         mol.set_positions_angstrom(&[[10.0, 20.0, 30.0]]).unwrap();
         let p = mol.atoms[0].position;
