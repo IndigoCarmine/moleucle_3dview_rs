@@ -374,15 +374,11 @@ mod tests {
         };
 
         (0..count)
-            .map(|id| Atom {
-                position: Vec3::new(
-                    next() * 8.0 - 4.0,
-                    next() * 8.0 - 4.0,
-                    next() * 8.0 - 4.0,
-                ),
-                element: Element::new("C"),
-                id,
-                meta: None,
+            .map(|_| {
+                Atom::new(
+                    Vec3::new(next() * 8.0 - 4.0, next() * 8.0 - 4.0, next() * 8.0 - 4.0),
+                    Element::new("C"),
+                )
             })
             .collect()
     }

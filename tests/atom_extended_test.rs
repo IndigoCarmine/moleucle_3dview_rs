@@ -1,4 +1,7 @@
 /// Test to verify extended Atom structure with PDB attributes
+///
+/// Names live in the molecule's shared symbol table, so they are read through
+/// the molecule (`name_of`/`res_name_of`) rather than off the atom.
 use moleucle_3dview_rs::Molecule;
 use std::path::Path;
 
@@ -8,14 +11,14 @@ fn test_atom_extended_fields_mol2() {
         .expect("Failed to load Benzene.mol2");
 
     // MOL2 atoms should have None for PDB-specific fields
-    for atom in &mol.atoms {
-        assert!(atom.name().is_none(), "MOL2 atoms should not have name");
-        assert!(atom.res_name().is_none(), "MOL2 atoms should not have res_name");
+    for (index, atom) in mol.atoms.iter().enumerate() {
+        assert!(mol.name_of(atom).is_none(), "MOL2 atoms should not have name");
+        assert!(mol.res_name_of(atom).is_none(), "MOL2 atoms should not have res_name");
         assert!(atom.chain_id().is_none(), "MOL2 atoms should not have chain_id");
         assert!(atom.res_seq().is_none(), "MOL2 atoms should not have res_seq");
-        assert!(atom.occupancy().is_none(), "MOL2 atoms should not have occupancy");
-        assert!(atom.temp_factor().is_none(), "MOL2 atoms should not have temp_factor");
-        assert!(atom.charge().is_none(), "MOL2 atoms should not have charge");
+        assert!(mol.occupancy(index).is_none(), "MOL2 atoms should not have occupancy");
+        assert!(mol.temp_factor(index).is_none(), "MOL2 atoms should not have temp_factor");
+        assert!(mol.charge(index).is_none(), "MOL2 atoms should not have charge");
     }
 }
 
@@ -27,11 +30,11 @@ fn test_atom_extended_fields_pdb() {
     // PDB atoms should have Some values for extended fields
     for atom in &mol.atoms {
         assert!(
-            atom.name().is_some(),
+            mol.name_of(atom).is_some(),
             "PDB atoms should have name (e.g., C00, H0C)"
         );
         assert!(
-            atom.res_name().is_some(),
+            mol.res_name_of(atom).is_some(),
             "PDB atoms should have res_name (e.g., ENAP)"
         );
         // Note: chain_id might be None if it's a space character
@@ -50,9 +53,8 @@ fn test_atom_pdb_name_field() {
         .expect("Failed to load A.pdb");
 
     // First atom should be "C00"
-    let first_atom = &mol.atoms[0];
     assert_eq!(
-        first_atom.name(),
+        mol.atom_name(0),
         Some("C00"),
         "First atom in A.pdb should be C00"
     );
@@ -65,7 +67,7 @@ fn test_atom_pdb_residue_info() {
 
     // Check residue information consistency
     for atom in &mol.atoms {
-        if let Some(res_name) = atom.res_name() {
+        if let Some(res_name) = mol.res_name_of(atom) {
             // A.pdb contains ENAP or ENA residues (PDB parsing may trim differently)
             assert!(
                 res_name == "ENAP" || res_name == "ENA",
@@ -92,12 +94,15 @@ fn test_atom_extended_structure() {
     assert!(atom.position.x.is_finite());
     
     // Extended fields
-    assert!(atom.name().is_some());
-    assert!(atom.res_name().is_some());
+    assert!(mol.name_of(atom).is_some());
+    assert!(mol.res_name_of(atom).is_some());
     assert!(atom.res_seq().is_some());
 
     println!(
-        "Extended Atom: id={}, element={}, name={:?}, res={:?}, seq={:?}",
-        atom.id, atom.element, atom.name(), atom.res_name(), atom.res_seq()
+        "Extended Atom: element={}, name={:?}, res={:?}, seq={:?}",
+        atom.element,
+        mol.name_of(atom),
+        mol.res_name_of(atom),
+        atom.res_seq()
     );
 }

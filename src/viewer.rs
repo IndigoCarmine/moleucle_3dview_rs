@@ -235,6 +235,29 @@ impl MoleculeViewer {
         self.bump_revision();
     }
 
+    /// The loaded molecule, if any.
+    ///
+    /// The viewer owns the one copy an application needs: reading through here
+    /// rather than keeping a parallel `Molecule` beside it is what keeps a
+    /// large system's atom array from existing twice.
+    pub fn molecule(&self) -> Option<&Molecule> {
+        self.molecule.as_ref()
+    }
+
+    /// Mutable access to the loaded molecule, bumping the render revision so
+    /// cached geometry is rebuilt. Use [`Self::update_positions`] for the
+    /// positions-only case; this is for edits that change atoms or bonds.
+    pub fn molecule_mut(&mut self) -> Option<&mut Molecule> {
+        self.bump_revision();
+        self.molecule.as_mut()
+    }
+
+    /// Take the molecule back out, leaving the viewer empty.
+    pub fn take_molecule(&mut self) -> Option<Molecule> {
+        self.bump_revision();
+        self.molecule.take()
+    }
+
     /// Update the loaded molecule's atom positions in place for trajectory
     /// playback. Elements, bonds and metadata are untouched, so feeding
     /// successive frames reuses all existing storage. `positions` must match
@@ -380,7 +403,8 @@ impl MoleculeViewer {
             // about a quarter of the cost of the full cylinder test.
             let radius = default_ball_stick_bond_radius();
             for (i, bond) in mol.bonds.iter().enumerate() {
-                if !self.is_atom_visible(bond.atom_a) || !self.is_atom_visible(bond.atom_b) {
+                let (index_a, index_b) = bond.endpoints();
+                if !self.is_atom_visible(index_a) || !self.is_atom_visible(index_b) {
                     continue;
                 }
                 let Some((p1, p2)) = mol.bond_endpoints(bond) else {
@@ -511,20 +535,15 @@ mod tests {
     use crate::molecule::{Bond, Element};
     use crate::overlays::SimulationCellState;
 
-    fn atom_at(x: f32, y: f32, z: f32, id: usize) -> Atom {
-        Atom {
-            position: Vec3::new(x, y, z),
-            element: Element::new("C"),
-            id,
-            meta: None,
-        }
+    fn atom_at(x: f32, y: f32, z: f32) -> Atom {
+        Atom::new(Vec3::new(x, y, z), Element::new("C"))
     }
 
     /// A single atom in a 10 nm cubic cell.
     fn one_atom_viewer() -> MoleculeViewer {
         let mut viewer = MoleculeViewer::new();
         viewer.set_molecule(Molecule::from_atoms_bonds(
-            vec![atom_at(0.0, 0.0, 0.0, 0)],
+            vec![atom_at(0.0, 0.0, 0.0)],
             Vec::new(),
         ));
         viewer
@@ -570,7 +589,7 @@ mod tests {
     fn the_nearest_image_wins() {
         let mut viewer = MoleculeViewer::new();
         viewer.set_molecule(Molecule::from_atoms_bonds(
-            vec![atom_at(0.0, 0.0, 0.0, 0), atom_at(0.0, 0.0, 3.0, 1)],
+            vec![atom_at(0.0, 0.0, 0.0), atom_at(0.0, 0.0, 3.0)],
             Vec::new(),
         ));
         viewer.set_periodic_images(Some(PeriodicImages::new(cubic_cell(10.0), [1, 1, 3])));
@@ -617,10 +636,10 @@ mod tests {
         let mut viewer = MoleculeViewer::new();
         viewer.set_molecule(Molecule::from_atoms_bonds(
             vec![
-                atom_at(0.0, 0.0, 0.0, 0),
+                atom_at(0.0, 0.0, 0.0),
                 // Far from the rest, so it sits on the bounding sphere's shell.
-                atom_at(20.0, 0.0, 0.0, 1),
-                atom_at(20.2, 0.0, 0.0, 2),
+                atom_at(20.0, 0.0, 0.0),
+                atom_at(20.2, 0.0, 0.0),
             ],
             vec![Bond {
                 atom_a: 1,
@@ -658,7 +677,7 @@ mod tests {
     fn bond_picking_reaches_replicas() {
         let mut viewer = MoleculeViewer::new();
         viewer.set_molecule(Molecule::from_atoms_bonds(
-            vec![atom_at(-1.0, 0.0, 0.0, 0), atom_at(1.0, 0.0, 0.0, 1)],
+            vec![atom_at(-1.0, 0.0, 0.0), atom_at(1.0, 0.0, 0.0)],
             vec![Bond {
                 atom_a: 0,
                 atom_b: 1,

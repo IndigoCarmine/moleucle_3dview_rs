@@ -73,7 +73,9 @@ pub use additional_render::{AdditionalRender, GpuPipeline};
 pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
 pub use camera::{Camera, OrbitalCamera};
 pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
-pub use molecule::{Atom, AtomMeta, AtomRecord, Bond, Element, Molecule};
+pub use molecule::{
+    Atom, AtomMeta, AtomRecord, Bond, Element, Molecule, MoleculeBuilder, SymbolId, SymbolTable,
+};
 pub use offscreen_renderer::{LodSettings, OffscreenRenderer, RenderStyle};
 pub use periodic::{PeriodicImages, MAX_PERIODIC_IMAGES};
 pub use overlays::{

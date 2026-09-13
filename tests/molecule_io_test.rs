@@ -60,11 +60,6 @@ fn test_mol2_atom_data() {
 
     let first_atom = &mol.atoms[0];
     assert!(!first_atom.element.is_empty(), "Atom should have element symbol");
-    // `id` is the atom's own 0-based index, the same in every loader.
-    for (index, atom) in mol.atoms.iter().enumerate() {
-        assert_eq!(atom.id, index, "atom ids should be 0-based indices");
-    }
-
     // Position should be valid numbers (not NaN, not infinity)
     assert!(first_atom.position.x.is_finite(), "X coordinate should be finite");
     assert!(first_atom.position.y.is_finite(), "Y coordinate should be finite");
@@ -106,12 +101,12 @@ fn test_mol2_bond_validity() {
     // Check all bonds reference valid atoms
     for bond in &mol.bonds {
         assert!(
-            bond.atom_a < mol.atoms.len(),
+            (bond.atom_a as usize) < mol.atoms.len(),
             "Bond atom_a index {} out of range",
             bond.atom_a
         );
         assert!(
-            bond.atom_b < mol.atoms.len(),
+            (bond.atom_b as usize) < mol.atoms.len(),
             "Bond atom_b index {} out of range",
             bond.atom_b
         );
@@ -219,13 +214,13 @@ fn test_pdb_bond_validity() {
     // Check all bonds reference valid atoms
     for bond in &mol.bonds {
         assert!(
-            bond.atom_a < mol.atoms.len(),
+            (bond.atom_a as usize) < mol.atoms.len(),
             "Bond atom_a index {} out of range (total atoms: {})",
             bond.atom_a,
             mol.atoms.len()
         );
         assert!(
-            bond.atom_b < mol.atoms.len(),
+            (bond.atom_b as usize) < mol.atoms.len(),
             "Bond atom_b index {} out of range (total atoms: {})",
             bond.atom_b,
             mol.atoms.len()
@@ -450,8 +445,8 @@ fn test_bond_distance_stats() {
     let mut sum_dist = 0.0;
 
     for bond in &mol.bonds {
-        let a = mol.atoms[bond.atom_a].position;
-        let b = mol.atoms[bond.atom_b].position;
+        let a = mol.atoms[bond.atom_a as usize].position;
+        let b = mol.atoms[bond.atom_b as usize].position;
         let dist = (a - b).magnitude();
 
         min_dist = min_dist.min(dist);

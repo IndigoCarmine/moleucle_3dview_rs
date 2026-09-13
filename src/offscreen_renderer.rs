@@ -1147,7 +1147,8 @@ impl OffscreenRenderer {
             if out.len() >= MAX_IMPOSTOR_INSTANCES {
                 break;
             }
-            if !frame.is_atom_visible(bond.atom_a) || !frame.is_atom_visible(bond.atom_b) {
+            let (index_a, index_b) = bond.endpoints();
+            if !frame.is_atom_visible(index_a) || !frame.is_atom_visible(index_b) {
                 continue;
             }
             let Some((a, b)) = mol.bond_endpoints(bond) else {
@@ -1360,17 +1361,52 @@ impl Default for OffscreenRenderer {
     }
 }
 
-fn bond_line_offsets(order: usize) -> Vec<f32> {
+/// Lateral offsets of the parallel lines drawn for a bond of the given order.
+///
+/// Fixed-size and `Copy`: this is called once per bond on every geometry
+/// rebuild, and on a fully-bonded system a `Vec` here meant one heap allocation
+/// per bond per frame of trajectory playback. Orders past `MAX_BOND_LINES` are
+/// drawn as that many lines, which is already more than a chemical bond has.
+const MAX_BOND_LINES: usize = 6;
+
+#[derive(Clone, Copy)]
+struct BondLineOffsets {
+    offsets: [f32; MAX_BOND_LINES],
+    len: usize,
+}
+
+impl BondLineOffsets {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl IntoIterator for BondLineOffsets {
+    type Item = f32;
+    type IntoIter = std::iter::Take<std::array::IntoIter<f32, MAX_BOND_LINES>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.offsets.into_iter().take(self.len)
+    }
+}
+
+fn bond_line_offsets(order: usize) -> BondLineOffsets {
     const DEFAULT_BOND_SPACING: f32 = 0.01;
-    match order {
-        0 | 1 => vec![0.0],
-        2 => vec![-DEFAULT_BOND_SPACING, DEFAULT_BOND_SPACING],
-        3 => vec![-DEFAULT_BOND_SPACING, 0.0, DEFAULT_BOND_SPACING],
+    let count = order.clamp(1, MAX_BOND_LINES);
+    let mut offsets = [0.0f32; MAX_BOND_LINES];
+    match count {
+        1 => {}
+        2 => offsets[..2].copy_from_slice(&[-DEFAULT_BOND_SPACING, DEFAULT_BOND_SPACING]),
+        3 => offsets[..3].copy_from_slice(&[-DEFAULT_BOND_SPACING, 0.0, DEFAULT_BOND_SPACING]),
         n => {
-            let spacing = DEFAULT_BOND_SPACING;
             let half = (n as f32 - 1.0) * 0.5;
-            (0..n).map(|i| (i as f32 - half) * spacing).collect()
+            for (i, slot) in offsets[..n].iter_mut().enumerate() {
+                *slot = (i as f32 - half) * DEFAULT_BOND_SPACING;
+            }
         }
+    }
+    BondLineOffsets {
+        offsets,
+        len: count,
     }
 }
 
@@ -1604,11 +1640,8 @@ mod tests {
     fn molecule_with(atom_count: usize) -> Molecule {
         Molecule::from_atoms_bonds(
             (0..atom_count)
-                .map(|i| Atom {
-                    position: Vec3::new(i as f32 * 0.15, 0.0, 0.0),
-                    element: Element::new("C"),
-                    id: i,
-                    meta: None,
+                .map(|i| {
+                    Atom::new(Vec3::new(i as f32 * 0.15, 0.0, 0.0), Element::new("C"))
                 })
                 .collect(),
             Vec::new(),

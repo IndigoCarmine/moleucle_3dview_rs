@@ -67,15 +67,15 @@ pub(super) fn build_ballstick_vertices(
         };
 
     let max_vertices = MAX_RENDER_VERTICES;
+    // Reserve what this build will actually emit, not a per-atom rule of thumb.
+    // The old estimate (200 vertices per atom) overshot the real cost by ~2x at
+    // the default mesh resolution and saturated at `MAX_RENDER_VERTICES` above
+    // ~31k atoms -- a flat 240 MB `Vec` allocated and zeroed on every geometry
+    // rebuild, which during trajectory playback means every frame.
+    // `estimate_ballstick_vertices` is the same count `pick_ballstick_quality`
+    // already computes to choose the quality level.
     let mut vertices = if let Some(mol) = molecule {
-        let capacity = mol
-            .bonds
-            .len()
-            .saturating_mul(50)
-            .saturating_add(mol.atoms.len().saturating_mul(200))
-            .saturating_add(225)
-            .min(max_vertices);
-        Vec::with_capacity(capacity)
+        Vec::with_capacity(estimate_ballstick_vertices(context, mol, quality).min(max_vertices))
     } else {
         Vec::with_capacity(225.min(max_vertices))
     };
@@ -249,19 +249,10 @@ mod tests {
     /// A short chain: atoms in a line, bonded to their neighbour.
     fn chain(count: usize) -> Molecule {
         let atoms = (0..count)
-            .map(|i| Atom {
-                position: Vec3::new(i as f32 * 0.15, 0.0, 0.0),
-                element: Element::new("C"),
-                id: i,
-                meta: None,
-            })
+            .map(|i| Atom::new(Vec3::new(i as f32 * 0.15, 0.0, 0.0), Element::new("C")))
             .collect();
         let bonds = (0..count.saturating_sub(1))
-            .map(|i| Bond {
-                atom_a: i,
-                atom_b: i + 1,
-                order: 1,
-            })
+            .map(|i| Bond::new(i, i + 1, 1))
             .collect();
         Molecule::from_atoms_bonds(atoms, bonds)
     }

@@ -33,7 +33,8 @@ impl StyleBuildContext<'_> {
     /// bonds hanging off it, or they would end in mid-air.
     #[inline]
     pub(super) fn is_bond_visible(&self, bond: &crate::molecule::Bond) -> bool {
-        self.is_atom_visible(bond.atom_a) && self.is_atom_visible(bond.atom_b)
+        let (a, b) = bond.endpoints();
+        self.is_atom_visible(a) && self.is_atom_visible(b)
     }
 }
 
