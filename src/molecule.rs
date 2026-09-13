@@ -406,6 +406,26 @@ impl Molecule {
         Ok(())
     }
 
+    /// Replace every atom's residue name, interning the new names.
+    ///
+    /// For callers that re-derive residue names from a second file (a topology
+    /// whose `[ atoms ]` names the residues a bare coordinate file does not).
+    /// `names` must have one entry per atom; otherwise the molecule is left
+    /// unchanged.
+    pub fn set_res_names<S: AsRef<str>>(&mut self, names: &[S]) -> Result<(), String> {
+        if names.len() != self.atoms.len() {
+            return Err(format!(
+                "residue-name count {} does not match atom count {}",
+                names.len(),
+                self.atoms.len()
+            ));
+        }
+        for (atom, name) in self.atoms.iter_mut().zip(names) {
+            atom.res_name = self.symbols.intern(name.as_ref());
+        }
+        Ok(())
+    }
+
     /// Like [`set_positions`](Self::set_positions) but takes Ångström
     /// coordinates and applies the crate's Å→nm conversion. Useful for feeding
     /// trajectory frames straight from common formats without an intermediate
