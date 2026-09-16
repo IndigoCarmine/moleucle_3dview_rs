@@ -1,7 +1,6 @@
 mod ball_only_style;
 mod ball_stick_style;
 pub(super) mod circles;
-mod wireframe_style;
 
 use crate::viewer::ColorFn;
 use crate::Molecule;
@@ -53,15 +52,14 @@ pub(super) trait MolecularRenderStyle {
 /// drawn entirely by GPU instancing.
 ///
 /// `Circles` has no CPU geometry — it is drawn as ray-traced sphere impostors
-/// from an instance buffer — and the mesh styles fall back to that same
-/// pipeline above `MAX_MESH_ATOMS`. Returning `None` rather than panicking
-/// keeps a drift between that decision and this dispatch from taking the
-/// process down.
+/// from an instance buffer — `Wireframe` is drawn from its own line instance
+/// buffers, and the mesh styles fall back to the impostor pipeline above
+/// `MAX_MESH_ATOMS`. Returning `None` rather than panicking keeps a drift
+/// between that decision and this dispatch from taking the process down.
 pub(super) fn style_for(render_style: RenderStyle) -> Option<&'static dyn MolecularRenderStyle> {
     match render_style {
         RenderStyle::BallStick => Some(&ball_stick_style::BALL_STICK_STYLE),
         RenderStyle::BallOnly => Some(&ball_only_style::BALL_ONLY_STYLE),
-        RenderStyle::Wireframe => Some(&wireframe_style::WIREFRAME_STYLE),
-        RenderStyle::Circles => None,
+        RenderStyle::Wireframe | RenderStyle::Circles => None,
     }
 }

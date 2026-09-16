@@ -27,6 +27,12 @@ impl SelectedAtomRender {
 }
 
 impl AdditionalRender for SelectedAtomRender {
+    /// Without this every selected atom's UV sphere is tessellated on the CPU
+    /// and re-uploaded on every repaint, at the current mesh resolution.
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<SelectedAtomRenderState>()
+    }
+
     fn update_scene(&self, scene: &mut Scene, frame: &RenderFrameState<'_>) {
         let Some(molecule) = frame.molecule else {
             return;

@@ -2,8 +2,10 @@ use egui_wgpu::wgpu;
 use wgpu::util::DeviceExt;
 
 use super::render_styles::circles::CircleInstance;
-use super::{BondInstance, BondMeshVertex, CircleQuadVertex, RenderMesh, Uniforms, Vertex};
-use super::DEFAULT_BOND_CYLINDER_SIDES;
+use super::{
+    AtomCrossInstance, BondInstance, BondLineInstance, BondMeshVertex, CircleQuadVertex,
+    RenderMesh, Uniforms, Vertex, DEFAULT_BOND_CYLINDER_SIDES,
+};
 use crate::periodic::MAX_PERIODIC_IMAGES;
 
 /// One render pipeline in two variants that differ *only* in
@@ -69,6 +71,10 @@ pub(super) struct GpuResources {
     pub(super) pipeline: PipelineSet,
     pub(super) additional_pipeline: PipelineSet,
     pub(super) wire_pipeline: PipelineSet,
+    /// Instanced line pipelines for the `Wireframe` style: one bond expands
+    /// into two half-coloured segments, one unbonded atom into a cross.
+    pub(super) bond_line_pipeline: PipelineSet,
+    pub(super) atom_cross_pipeline: PipelineSet,
     pub(super) circles_pipeline: PipelineSet,
     pub(super) bond_pipeline: PipelineSet,
     pub(super) uniform_buffer: wgpu::Buffer,
@@ -94,6 +100,12 @@ pub(super) struct GpuResources {
     /// Unit cylinder mesh (non-indexed triangle list) shared by every bond.
     pub(super) bond_mesh_buffer: wgpu::Buffer,
     pub(super) bond_mesh_vertex_count: u32,
+    pub(super) bond_line_buffer: Option<wgpu::Buffer>,
+    pub(super) bond_line_count: u32,
+    pub(super) bond_line_capacity: usize,
+    pub(super) atom_cross_buffer: Option<wgpu::Buffer>,
+    pub(super) atom_cross_count: u32,
+    pub(super) atom_cross_capacity: usize,
     pub(super) bond_instance_buffer: Option<wgpu::Buffer>,
     pub(super) bond_instance_count: u32,
     pub(super) bond_instance_capacity: usize,
@@ -245,6 +257,36 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         create_wire_pipeline(device, &layout, &wire_shader, label, depth_write)
     });
 
+    let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("offscreen-line-shader"),
+        source: wgpu::ShaderSource::Wgsl(LINE_SHADER.into()),
+    });
+    let bond_line_pipeline = pipeline_set("offscreen-bond-line-pipeline", |label, depth_write| {
+        create_line_pipeline(
+            device,
+            &layout,
+            &line_shader,
+            label,
+            depth_write,
+            "vs_bond",
+            std::mem::size_of::<BondLineInstance>() as u64,
+            &BOND_LINE_ATTRIBUTES,
+        )
+    });
+    let atom_cross_pipeline =
+        pipeline_set("offscreen-atom-cross-pipeline", |label, depth_write| {
+            create_line_pipeline(
+                device,
+                &layout,
+                &line_shader,
+                label,
+                depth_write,
+                "vs_cross",
+                std::mem::size_of::<AtomCrossInstance>() as u64,
+                &ATOM_CROSS_ATTRIBUTES,
+            )
+        });
+
     let circles_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-circles-shader"),
         source: wgpu::ShaderSource::Wgsl(CIRCLES_SHADER.into()),
@@ -298,6 +340,8 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         pipeline,
         additional_pipeline,
         wire_pipeline,
+        bond_line_pipeline,
+        atom_cross_pipeline,
         circles_pipeline,
         bond_pipeline,
         uniform_buffer,
@@ -314,6 +358,12 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
         circles_instance_capacity: 0,
         bond_mesh_buffer,
         bond_mesh_vertex_count,
+        bond_line_buffer: None,
+        bond_line_count: 0,
+        bond_line_capacity: 0,
+        atom_cross_buffer: None,
+        atom_cross_count: 0,
+        atom_cross_capacity: 0,
         bond_instance_buffer: None,
         bond_instance_count: 0,
         bond_instance_capacity: 0,
@@ -412,6 +462,95 @@ fn create_wire_pipeline(
                         shader_location: 2,
                     },
                 ],
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(depth_stencil_state(depth_write)),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Instance attributes for [`BondLineInstance`]: `a`, `color_a`, `b`, `color_b`.
+const BOND_LINE_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 12,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 16,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 28,
+        shader_location: 3,
+    },
+];
+
+/// Instance attributes for [`AtomCrossInstance`]: `center`, `color`.
+const ATOM_CROSS_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 12,
+        shader_location: 1,
+    },
+];
+
+/// A `LineList` pipeline whose every vertex comes from an instance plus
+/// `@builtin(vertex_index)` — no per-vertex buffer at all. Both `Wireframe`
+/// pipelines share this shape and differ only in entry point and instance
+/// layout.
+#[allow(clippy::too_many_arguments)]
+fn create_line_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    depth_write: bool,
+    entry_point: &str,
+    instance_stride: u64,
+    attributes: &[wgpu::VertexAttribute],
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(entry_point),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: instance_stride,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes,
             }],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
@@ -727,6 +866,93 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const LINE_SHADER: &str = r#"
+struct VSOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+struct Uniforms {
+    view_proj: mat4x4<f32>,
+    viewport: vec2<f32>,
+    focal: f32,
+    _pad: f32,
+    camera_right: vec4<f32>,
+    camera_up: vec4<f32>,
+    camera_forward: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct ImageUniform {
+    translation: vec3<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> image: ImageUniform;
+
+// Half-width of the cross drawn for an atom no bond reaches, in nanometers.
+const CROSS_SPAN: f32 = 0.02;
+
+fn project(world: vec3<f32>, packed: u32) -> VSOut {
+    var out: VSOut;
+    out.position = uniforms.view_proj * vec4<f32>(world + image.translation, 1.0);
+    out.color = unpack4x8unorm(packed);
+    return out;
+}
+
+// One bond instance, four vertices: a -> mid in the first atom's colour, then
+// mid -> b in the second's. Drawn as two LineList segments.
+@vertex
+fn vs_bond(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) a: vec3<f32>,
+    @location(1) color_a: u32,
+    @location(2) b: vec3<f32>,
+    @location(3) color_b: u32,
+) -> VSOut {
+    let mid = (a + b) * 0.5;
+    var world = b;
+    var packed = color_b;
+    if (vertex_index == 0u) {
+        world = a;
+        packed = color_a;
+    } else if (vertex_index == 1u) {
+        world = mid;
+        packed = color_a;
+    } else if (vertex_index == 2u) {
+        world = mid;
+        packed = color_b;
+    }
+    return project(world, packed);
+}
+
+// One unbonded atom, six vertices: three axis-aligned segments through the
+// centre, each running from -CROSS_SPAN to +CROSS_SPAN.
+@vertex
+fn vs_cross(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) center: vec3<f32>,
+    @location(1) packed: u32,
+) -> VSOut {
+    let axis = vertex_index / 2u;
+    let offset = select(1.0, -1.0, (vertex_index & 1u) == 0u) * CROSS_SPAN;
+    var direction = vec3<f32>(0.0, 0.0, 1.0);
+    if (axis == 0u) {
+        direction = vec3<f32>(1.0, 0.0, 0.0);
+    } else if (axis == 1u) {
+        direction = vec3<f32>(0.0, 1.0, 0.0);
+    }
+    return project(center + direction * offset, packed);
+}
+
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
 const CIRCLES_SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -989,6 +1215,7 @@ mod shader_tests {
     fn all_wgsl_shaders_compile() {
         validate("MESH_SHADER", MESH_SHADER);
         validate("WIRE_SHADER", WIRE_SHADER);
+        validate("LINE_SHADER", LINE_SHADER);
         validate("CIRCLES_SHADER", CIRCLES_SHADER);
         validate("BOND_SHADER", BOND_SHADER);
     }

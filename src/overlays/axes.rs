@@ -50,6 +50,13 @@ impl Default for AxesRender {
 }
 
 impl AdditionalRender for AxesRender {
+    /// Without this the triad is rebuilt on every repaint, and with it
+    /// `Molecule::radius()` — two O(atoms) passes plus a square root per atom —
+    /// for a length that only changes when the molecule does.
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<AxesState>()
+    }
+
     fn gpu_pipeline(&self) -> GpuPipeline {
         GpuPipeline::Triangles
     }

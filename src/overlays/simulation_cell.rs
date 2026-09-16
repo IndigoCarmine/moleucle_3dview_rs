@@ -146,6 +146,10 @@ impl Default for SimulationCellRender {
 }
 
 impl AdditionalRender for SimulationCellRender {
+    fn revision(&self, frame: &RenderFrameState<'_>) -> Option<u64> {
+        frame.overlay_revision::<SimulationCellState>()
+    }
+
     fn gpu_pipeline(&self) -> GpuPipeline {
         GpuPipeline::Wireframe
     }
