@@ -566,10 +566,14 @@ impl InteractiveMoleculeViewport {
         self.camera
             .set_aspect(width as f32 / height as f32);
 
-        if let Some(molecule) = self.viewer.molecule.as_ref() {
-            let camera_position = self.camera.position();
-            let distance = (camera_position - molecule.center()).magnitude();
-            self.offscreen.submit_lod_distance(distance);
+        // `center()` is an O(atoms) fold, so only pay it when the LOD worker is
+        // actually going to use the distance.
+        if self.offscreen.lod_enabled() {
+            if let Some(molecule) = self.viewer.molecule.as_ref() {
+                let camera_position = self.camera.position();
+                let distance = (camera_position - molecule.center()).magnitude();
+                self.offscreen.submit_lod_distance(distance);
+            }
         }
 
         self.offscreen

@@ -248,6 +248,11 @@ pub struct OffscreenRenderer {
     /// `write_buffer` into storage it already owns instead of a fresh
     /// allocation on both sides.
     additional_batches: Vec<AdditionalBatch>,
+    /// Whether the molecule draws in the translucent phase, and the geometry
+    /// revision it was decided at. Deciding means scanning every per-atom color
+    /// for alpha, which is O(atoms); the answer changes only when the colors or
+    /// the whole-molecule opacity do, and both move the revision.
+    translucent_cache: Option<(u64, bool)>,
     /// The molecule's bounding sphere and the revision it was measured at.
     /// Recomputing it is O(atoms), and frustum-culling periodic images needs it
     /// every frame.
@@ -348,6 +353,7 @@ impl OffscreenRenderer {
             geometry_cache_key: None,
             additional_renders: Vec::new(),
             additional_batches: Vec::new(),
+            translucent_cache: None,
             molecule_bounds: None,
             scratch_circle_instances: Vec::new(),
             scratch_bond_instances: Vec::new(),
@@ -647,6 +653,8 @@ impl OffscreenRenderer {
         // idle 500k-atom view, and equal-size trajectory frames, don't churn.
         let cache_miss = self.geometry_cache_key != Some(cache_key);
         let rebuild_impostors = use_impostors && cache_miss;
+        // Decided here, before `gpu` takes a mutable borrow of `self`.
+        let molecule_translucent = self.molecule_translucency(frame);
 
         // When BallStick falls back to impostors, render its bonds via the
         // instanced cylinder pipeline (one instance per bond) so connectivity
@@ -968,15 +976,6 @@ impl OffscreenRenderer {
                 multiview_mask: None,
             });
 
-            // A faded molecule must not stamp the depth buffer, or the atoms
-            // behind it (and any additional render drawn later in this pass)
-            // stay depth-culled no matter how low the alpha goes. Per-atom
-            // colors carry their own alpha, so check those too.
-            let molecule_translucent = frame.molecule_opacity < 1.0
-                || frame
-                    .atom_colors
-                    .is_some_and(|colors| colors.iter().any(|color| color[3] < 1.0));
-
             // Draw every opaque thing before every translucent thing.
             //
             // Both groups depth-*test*, only the opaque group depth-*writes*, so
@@ -1136,6 +1135,15 @@ impl OffscreenRenderer {
             1.0,
         );
         self.render_frame_with_state(render_state, &frame)
+    }
+
+    /// Whether the LOD manager will act on a submitted distance.
+    ///
+    /// Producing that distance means `Molecule::center()`, an O(atoms) fold, so
+    /// a caller should ask first rather than paying it on every frame for a
+    /// worker that is switched off and throws it away.
+    pub fn lod_enabled(&self) -> bool {
+        self.preference.lod_settings().enabled
     }
 
     pub fn submit_lod_distance(&self, distance: f32) {
@@ -1460,6 +1468,28 @@ impl OffscreenRenderer {
         }
 
         sphere
+    }
+
+    /// Whether the molecule belongs in the translucent phase, memoized against
+    /// the frame's geometry revision.
+    ///
+    /// A faded molecule must not stamp the depth buffer, or the atoms behind it
+    /// (and any additional render drawn later in this pass) stay depth-culled
+    /// no matter how low the alpha goes. Per-atom colors carry their own alpha,
+    /// so they have to be checked too -- which is the O(atoms) part.
+    fn molecule_translucency(&mut self, frame: &RenderFrameState<'_>) -> bool {
+        if let Some((revision, translucent)) = self.translucent_cache {
+            if revision == frame.geometry_revision {
+                return translucent;
+            }
+        }
+
+        let translucent = frame.molecule_opacity < 1.0
+            || frame
+                .atom_colors
+                .is_some_and(|colors| colors.iter().any(|color| color[3] < 1.0));
+        self.translucent_cache = Some((frame.geometry_revision, translucent));
+        translucent
     }
 
     fn build_geometry_cache_key(&self, frame: &RenderFrameState<'_>) -> GeometryCacheKey {
