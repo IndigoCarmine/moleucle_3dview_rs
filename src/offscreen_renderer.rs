@@ -33,6 +33,14 @@ const MIN_SPHERE_VERTICES_PER_ATOM: usize = 3 * 6 * 6;
 /// instead of silently truncating atoms.
 const MAX_MESH_ATOMS: usize = MAX_RENDER_VERTICES / MIN_SPHERE_VERTICES_PER_ATOM;
 
+/// Maximum instances per `Wireframe` buffer. Sized from the same byte budget as
+/// the impostor cap, against the larger of the two line instance types, so one
+/// limit covers both. At 32 bytes an instance that is ~7.8M bonds — far past
+/// the ~3.1M the old baked-vertex path could hold before it began dropping
+/// atoms silently.
+const MAX_LINE_INSTANCES: usize =
+    SAFE_MAX_VERTEX_BUFFER_BYTES / std::mem::size_of::<BondLineInstance>();
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OffscreenRendererPreference {
     mesh_resolution: usize,
@@ -150,6 +158,42 @@ struct BondInstance {
     color: [f32; 4],
 }
 
+/// Per-bond instance for the `Wireframe` style. One instance expands in the
+/// vertex shader into the two half-bond segments that meet at the bond's
+/// midpoint, each taking the colour of the atom on its side.
+///
+/// Colours are packed RGBA8 rather than `[f32; 4]`: at MD scale the instance
+/// array is the whole geometry budget, and four bytes say as much about a line
+/// colour as sixteen do.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BondLineInstance {
+    a: [f32; 3],
+    color_a: u32,
+    b: [f32; 3],
+    color_b: u32,
+}
+
+/// Per-atom instance for the `Wireframe` style's cross marker, emitted only for
+/// atoms with no visible bond — a bonded atom is already drawn as the endpoint
+/// of its own bonds, so a marker there is 3 extra lines saying nothing.
+///
+/// The cross's half-width lives in `LINE_SHADER`'s `CROSS_SPAN`; only the
+/// shader needs it.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AtomCrossInstance {
+    center: [f32; 3],
+    color: u32,
+}
+
+/// Pack a straight RGBA colour into the `unpack4x8unorm` byte order (red in the
+/// low byte).
+fn pack_rgba(color: [f32; 4]) -> u32 {
+    let byte = |v: f32| ((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) & 0xff;
+    byte(color[0]) | (byte(color[1]) << 8) | (byte(color[2]) << 16) | (byte(color[3]) << 24)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -212,6 +256,13 @@ pub struct OffscreenRenderer {
     /// frames so trajectory playback refills them without reallocating.
     scratch_circle_instances: Vec<CircleInstance>,
     scratch_bond_instances: Vec<BondInstance>,
+    /// Reusable CPU scratch for the instanced `Wireframe` geometry.
+    scratch_bond_line_instances: Vec<BondLineInstance>,
+    scratch_atom_cross_instances: Vec<AtomCrossInstance>,
+    /// Per-atom "has at least one visible bond" flags, rebuilt with the line
+    /// instances and kept only to size the cross pass. Retained so a trajectory
+    /// frame refills it instead of allocating.
+    scratch_bonded_atoms: Vec<bool>,
 }
 
 /// One [`AdditionalRender`]'s retained CPU scratch and GPU buffers.
@@ -300,6 +351,9 @@ impl OffscreenRenderer {
             molecule_bounds: None,
             scratch_circle_instances: Vec::new(),
             scratch_bond_instances: Vec::new(),
+            scratch_bond_line_instances: Vec::new(),
+            scratch_atom_cross_instances: Vec::new(),
+            scratch_bonded_atoms: Vec::new(),
         }
     }
 
@@ -546,25 +600,28 @@ impl OffscreenRenderer {
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let render_style = self.preference.render_style();
-        // Count the atoms that will actually be drawn: hiding 90% of a large
-        // system should get the mesh styles back, not leave it stuck on the
-        // impostor fallback.
-        let atom_count = frame.visible_atom_count();
         // Mesh styles duplicate sphere geometry per atom and would overflow the
         // vertex buffer past MAX_MESH_ATOMS, silently dropping atoms. Fall back
         // to the instanced impostor pipeline so every atom is still drawn.
+        //
+        // `visible_atom_count` is O(atoms) whenever a visibility mask is set, so
+        // it is evaluated only for the two styles whose budget depends on it --
+        // not once per frame for every style, as it used to be.
         let mesh_overflow = matches!(render_style, RenderStyle::BallStick | RenderStyle::BallOnly)
-            && atom_count > MAX_MESH_ATOMS;
+            && frame.visible_atom_count() > MAX_MESH_ATOMS;
         let use_impostors = matches!(render_style, RenderStyle::Circles) || mesh_overflow;
+        // Wireframe has its own instanced pipelines and never goes through the
+        // baked-vertex styles.
+        let use_lines = matches!(render_style, RenderStyle::Wireframe);
 
-        let style = if use_impostors {
+        let style = if use_impostors || use_lines {
             None
         } else {
             style_for(render_style)
         };
 
         let cache_key = self.build_geometry_cache_key(frame);
-        let rebuilt_vertices = if !use_impostors && self.geometry_cache_key != Some(cache_key) {
+        let rebuilt_vertices = if style.is_some() && self.geometry_cache_key != Some(cache_key) {
             if let Some(active_style) = style {
                 let ctx = StyleBuildContext {
                     preference: self.preference,
@@ -596,14 +653,26 @@ impl OffscreenRenderer {
         // still shows at a scale where the per-bond CPU mesh would overflow.
         let bonds_as_instances = mesh_overflow && matches!(render_style, RenderStyle::BallStick);
         let rebuild_bonds = bonds_as_instances && cache_miss;
+        let rebuild_lines = use_lines && cache_miss;
 
         let mut circle_scratch = std::mem::take(&mut self.scratch_circle_instances);
         let mut bond_scratch = std::mem::take(&mut self.scratch_bond_instances);
+        let mut bond_line_scratch = std::mem::take(&mut self.scratch_bond_line_instances);
+        let mut cross_scratch = std::mem::take(&mut self.scratch_atom_cross_instances);
+        let mut bonded_scratch = std::mem::take(&mut self.scratch_bonded_atoms);
         if rebuild_impostors {
             Self::fill_impostor_instances(&mut circle_scratch, render_style, frame);
         }
         if rebuild_bonds {
             Self::fill_bond_instances(&mut bond_scratch, frame);
+        }
+        if rebuild_lines {
+            Self::fill_line_instances(
+                &mut bond_line_scratch,
+                &mut cross_scratch,
+                &mut bonded_scratch,
+                frame,
+            );
         }
 
         // Rebuild every overlay's CPU geometry into its retained scratch. The
@@ -727,6 +796,26 @@ impl OffscreenRenderer {
                 &mut gpu.bond_instance_capacity,
                 "offscreen-bond-instance-buffer",
                 &bond_scratch,
+            );
+            self.geometry_cache_key = Some(cache_key);
+        }
+
+        if rebuild_lines {
+            gpu.bond_line_count = upload_instances(
+                &render_state.device,
+                &render_state.queue,
+                &mut gpu.bond_line_buffer,
+                &mut gpu.bond_line_capacity,
+                "offscreen-bond-line-buffer",
+                &bond_line_scratch,
+            );
+            gpu.atom_cross_count = upload_instances(
+                &render_state.device,
+                &render_state.queue,
+                &mut gpu.atom_cross_buffer,
+                &mut gpu.atom_cross_capacity,
+                "offscreen-atom-cross-buffer",
+                &cross_scratch,
             );
             self.geometry_cache_key = Some(cache_key);
         }
@@ -922,23 +1011,8 @@ impl OffscreenRenderer {
                 if molecule_translucent == translucent_phase {
                     let depth_write = !molecule_translucent;
 
-                    let pipeline = if use_impostors {
-                        gpu.circles_pipeline.get(depth_write)
-                    } else {
-                        match self.preference.render_style() {
-                            RenderStyle::BallStick if self.preference.is_low_mode() => {
-                                gpu.wire_pipeline.get(depth_write)
-                            }
-                            RenderStyle::BallStick => gpu.pipeline.get(depth_write),
-                            RenderStyle::BallOnly => gpu.pipeline.get(depth_write),
-                            RenderStyle::Circles => gpu.circles_pipeline.get(depth_write),
-                            RenderStyle::Wireframe => gpu.wire_pipeline.get(depth_write),
-                        }
-                    };
-
-                    pass.set_pipeline(pipeline);
-
                     if use_impostors {
+                        pass.set_pipeline(gpu.circles_pipeline.get(depth_write));
                         if let Some(instance_buffer) = &gpu.circles_instance_buffer {
                             pass.set_vertex_buffer(0, gpu.circles_quad_buffer.slice(..));
                             pass.set_vertex_buffer(1, instance_buffer.slice(..));
@@ -959,9 +1033,36 @@ impl OffscreenRenderer {
                                 }
                             }
                         }
-                    } else if let Some(vertex_buffer) = &gpu.vertex_buffer {
-                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                        pass.draw(0..gpu.vertex_count, 0..1);
+                    } else if use_lines {
+                        // Two instanced draws, no baked vertices: four vertices
+                        // per bond (its two half-coloured halves) and six per
+                        // atom that no visible bond reaches.
+                        if gpu.bond_line_count > 0 {
+                            if let Some(buffer) = &gpu.bond_line_buffer {
+                                pass.set_pipeline(gpu.bond_line_pipeline.get(depth_write));
+                                pass.set_vertex_buffer(0, buffer.slice(..));
+                                pass.draw(0..4, 0..gpu.bond_line_count);
+                            }
+                        }
+                        if gpu.atom_cross_count > 0 {
+                            if let Some(buffer) = &gpu.atom_cross_buffer {
+                                pass.set_pipeline(gpu.atom_cross_pipeline.get(depth_write));
+                                pass.set_vertex_buffer(0, buffer.slice(..));
+                                pass.draw(0..6, 0..gpu.atom_cross_count);
+                            }
+                        }
+                    } else {
+                        let pipeline = match self.preference.render_style() {
+                            RenderStyle::BallStick if self.preference.is_low_mode() => {
+                                gpu.wire_pipeline.get(depth_write)
+                            }
+                            _ => gpu.pipeline.get(depth_write),
+                        };
+                        pass.set_pipeline(pipeline);
+                        if let Some(vertex_buffer) = &gpu.vertex_buffer {
+                            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                            pass.draw(0..gpu.vertex_count, 0..1);
+                        }
                     }
                 }
 
@@ -1005,6 +1106,9 @@ impl OffscreenRenderer {
         // frame refills them without reallocating.
         self.scratch_circle_instances = circle_scratch;
         self.scratch_bond_instances = bond_scratch;
+        self.scratch_bond_line_instances = bond_line_scratch;
+        self.scratch_atom_cross_instances = cross_scratch;
+        self.scratch_bonded_atoms = bonded_scratch;
         Ok(())
     }
 
@@ -1167,6 +1271,87 @@ impl OffscreenRenderer {
                 axis: [axis.x, axis.y, axis.z],
                 length: len,
                 color,
+            });
+        }
+    }
+
+    /// Fill the `Wireframe` style's two instance arrays: one per bond, and one
+    /// per atom that no visible bond reaches.
+    ///
+    /// This replaces a CPU bake of world-space line vertices. That bake cost 6
+    /// vertices (240 bytes) per *atom* for a fixed-size cross plus 2 per bond,
+    /// and at MD scale the crosses were ~82% of every line drawn — invisible at
+    /// any zoom that fits the system on screen. Here a bonded atom emits
+    /// nothing of its own, and a bond is 32 bytes that the shader expands into
+    /// its two half-coloured halves.
+    fn fill_line_instances(
+        bonds_out: &mut Vec<BondLineInstance>,
+        crosses_out: &mut Vec<AtomCrossInstance>,
+        bonded: &mut Vec<bool>,
+        frame: &RenderFrameState<'_>,
+    ) {
+        bonds_out.clear();
+        crosses_out.clear();
+        bonded.clear();
+        let Some(mol) = frame.molecule else {
+            return;
+        };
+
+        let opacity = frame.molecule_opacity;
+        let atom_color = |index: usize| -> u32 {
+            let base = frame
+                .atom_colors
+                .and_then(|colors| colors.get(index).copied())
+                .unwrap_or_else(|| {
+                    let c = (frame.color_fn)(&mol.atoms[index], false);
+                    [c.0, c.1, c.2, c.3]
+                });
+            pack_rgba([base[0], base[1], base[2], base[3] * opacity])
+        };
+
+        bonded.resize(mol.atoms.len(), false);
+        bonds_out.reserve(mol.bonds.len().min(MAX_LINE_INSTANCES));
+
+        for bond in &mol.bonds {
+            let (index_a, index_b) = bond.endpoints();
+            if !frame.is_atom_visible(index_a) || !frame.is_atom_visible(index_b) {
+                continue;
+            }
+            let Some((a, b)) = mol.bond_endpoints(bond) else {
+                continue;
+            };
+            // Marked only for bonds that are actually drawn, and marked even
+            // once the instance budget is spent. An atom whose bonds were all
+            // hidden has nothing drawn for it and should take a cross, or it
+            // would be shown and yet invisible; an atom whose bonds were
+            // dropped for want of room already has geometry nearby, so it
+            // should not sprout one.
+            bonded[index_a] = true;
+            bonded[index_b] = true;
+            if bonds_out.len() >= MAX_LINE_INSTANCES {
+                continue;
+            }
+            if (b - a).magnitude() < 1e-3 {
+                continue;
+            }
+            bonds_out.push(BondLineInstance {
+                a: [a.x, a.y, a.z],
+                color_a: atom_color(index_a),
+                b: [b.x, b.y, b.z],
+                color_b: atom_color(index_b),
+            });
+        }
+
+        for (index, atom) in mol.atoms.iter().enumerate() {
+            if bonded[index] || !frame.is_atom_visible(index) {
+                continue;
+            }
+            if crosses_out.len() >= MAX_LINE_INSTANCES {
+                break;
+            }
+            crosses_out.push(AtomCrossInstance {
+                center: [atom.position.x, atom.position.y, atom.position.z],
+                color: atom_color(index),
             });
         }
     }
@@ -1673,6 +1858,139 @@ mod tests {
         );
 
         renderer.build_geometry_cache_key(&frame)
+    }
+
+    /// A minimal frame over `molecule`, with an optional visibility mask.
+    fn line_frame<'a>(
+        molecule: &'a Molecule,
+        visible: Option<&'a [bool]>,
+    ) -> RenderFrameState<'a> {
+        RenderFrameState::new(
+            Some(molecule),
+            [0.0; 16],
+            None,
+            1.0,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            default_color_fn,
+            None,
+            RenderStyle::Wireframe,
+            16,
+            false,
+            1.0,
+        )
+        .with_visible_atoms(visible)
+    }
+
+    fn fill_lines(
+        molecule: &Molecule,
+        visible: Option<&[bool]>,
+    ) -> (Vec<BondLineInstance>, Vec<AtomCrossInstance>) {
+        let mut bonds = Vec::new();
+        let mut crosses = Vec::new();
+        let mut bonded = Vec::new();
+        OffscreenRenderer::fill_line_instances(
+            &mut bonds,
+            &mut crosses,
+            &mut bonded,
+            &line_frame(molecule, visible),
+        );
+        (bonds, crosses)
+    }
+
+    /// Three atoms in a row, the first two bonded, the third isolated.
+    fn chain_with_loner() -> Molecule {
+        Molecule::from_atoms_bonds(
+            vec![
+                Atom::new(Vec3::new(0.0, 0.0, 0.0), Element::new("C")),
+                Atom::new(Vec3::new(0.15, 0.0, 0.0), Element::new("O")),
+                Atom::new(Vec3::new(5.0, 0.0, 0.0), Element::new("N")),
+            ],
+            vec![crate::molecule::Bond::new(0, 1, 1)],
+        )
+    }
+
+    #[test]
+    fn only_atoms_without_a_bond_get_a_cross() {
+        let (bonds, crosses) = fill_lines(&chain_with_loner(), None);
+
+        assert_eq!(bonds.len(), 1, "one bond, one instance");
+        assert_eq!(crosses.len(), 1, "only the isolated atom is marked");
+        assert_eq!(crosses[0].center, [5.0, 0.0, 0.0]);
+    }
+
+    /// The whole point of the instanced rewrite: a fully bonded system draws no
+    /// per-atom geometry at all, where the baked path spent 6 vertices on every
+    /// atom regardless.
+    #[test]
+    fn a_fully_bonded_molecule_draws_no_crosses() {
+        let molecule = Molecule::from_atoms_bonds(
+            (0..4)
+                .map(|i| Atom::new(Vec3::new(i as f32 * 0.15, 0.0, 0.0), Element::new("C")))
+                .collect(),
+            (0..3)
+                .map(|i| crate::molecule::Bond::new(i, i + 1, 1))
+                .collect(),
+        );
+
+        let (bonds, crosses) = fill_lines(&molecule, None);
+
+        assert_eq!(bonds.len(), 3);
+        assert!(crosses.is_empty());
+    }
+
+    #[test]
+    fn half_bond_colors_come_from_the_two_atoms() {
+        let molecule = chain_with_loner();
+        let (bonds, _) = fill_lines(&molecule, None);
+
+        let expected = |index: usize| {
+            let c = default_color_fn(&molecule.atoms[index], false);
+            pack_rgba([c.0, c.1, c.2, c.3])
+        };
+        assert_eq!(bonds[0].color_a, expected(0));
+        assert_eq!(bonds[0].color_b, expected(1));
+        assert_ne!(
+            bonds[0].color_a, bonds[0].color_b,
+            "carbon and oxygen should not come out the same colour"
+        );
+    }
+
+    /// Hiding one endpoint hides the bond, which leaves the other endpoint with
+    /// nothing drawn for it — so it becomes an isolated atom and takes a cross.
+    /// Without that it would be shown and yet invisible.
+    #[test]
+    fn hiding_a_bond_endpoint_leaves_the_other_end_marked() {
+        let molecule = chain_with_loner();
+        let visible = [true, false, false];
+
+        let (bonds, crosses) = fill_lines(&molecule, Some(&visible));
+
+        assert!(bonds.is_empty(), "the bond has a hidden endpoint");
+        assert_eq!(crosses.len(), 1, "atom 0 has no visible bond left");
+        assert_eq!(crosses[0].center, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_hidden_isolated_atom_gets_no_cross() {
+        let molecule = chain_with_loner();
+        let visible = [true, true, false];
+
+        let (_, crosses) = fill_lines(&molecule, Some(&visible));
+
+        assert!(crosses.is_empty());
+    }
+
+    #[test]
+    fn packed_colors_round_trip_through_the_shader_byte_order() {
+        // Red in the low byte, alpha in the high one, matching unpack4x8unorm.
+        assert_eq!(pack_rgba([1.0, 0.0, 0.0, 1.0]), 0xff00_00ff);
+        assert_eq!(pack_rgba([0.0, 1.0, 0.0, 1.0]), 0xff00_ff00);
+        assert_eq!(pack_rgba([0.0, 0.0, 1.0, 1.0]), 0xffff_0000);
+        assert_eq!(pack_rgba([0.0, 0.0, 0.0, 0.0]), 0x0000_0000);
+        // Out-of-range input is clamped rather than wrapping round.
+        assert_eq!(pack_rgba([2.0, -1.0, 0.0, 1.0]), 0xff00_00ff);
     }
 
     #[test]
