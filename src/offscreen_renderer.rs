@@ -1891,10 +1891,7 @@ mod tests {
     }
 
     /// A minimal frame over `molecule`, with an optional visibility mask.
-    fn line_frame<'a>(
-        molecule: &'a Molecule,
-        visible: Option<&'a [bool]>,
-    ) -> RenderFrameState<'a> {
+    fn line_frame<'a>(molecule: &'a Molecule, visible: Option<&'a [bool]>) -> RenderFrameState<'a> {
         RenderFrameState::new(
             Some(molecule),
             [0.0; 16],

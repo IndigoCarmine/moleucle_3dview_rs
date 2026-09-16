@@ -4,9 +4,8 @@ use wgpu::util::DeviceExt;
 use super::render_styles::circles::CircleInstance;
 use super::{
     AtomCrossInstance, BondInstance, BondLineInstance, BondMeshVertex, CircleQuadVertex,
-    RenderMesh, Uniforms, Vertex,
+    RenderMesh, Uniforms, Vertex, DEFAULT_BOND_CYLINDER_SIDES,
 };
-use super::DEFAULT_BOND_CYLINDER_SIDES;
 use crate::periodic::MAX_PERIODIC_IMAGES;
 
 /// One render pipeline in two variants that differ *only* in
@@ -274,18 +273,19 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
             &BOND_LINE_ATTRIBUTES,
         )
     });
-    let atom_cross_pipeline = pipeline_set("offscreen-atom-cross-pipeline", |label, depth_write| {
-        create_line_pipeline(
-            device,
-            &layout,
-            &line_shader,
-            label,
-            depth_write,
-            "vs_cross",
-            std::mem::size_of::<AtomCrossInstance>() as u64,
-            &ATOM_CROSS_ATTRIBUTES,
-        )
-    });
+    let atom_cross_pipeline =
+        pipeline_set("offscreen-atom-cross-pipeline", |label, depth_write| {
+            create_line_pipeline(
+                device,
+                &layout,
+                &line_shader,
+                label,
+                depth_write,
+                "vs_cross",
+                std::mem::size_of::<AtomCrossInstance>() as u64,
+                &ATOM_CROSS_ATTRIBUTES,
+            )
+        });
 
     let circles_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-circles-shader"),
