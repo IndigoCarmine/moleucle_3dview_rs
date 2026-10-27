@@ -532,7 +532,9 @@ impl OffscreenRenderer {
 
         let mut out = Vec::with_capacity((unpadded as usize) * (height as usize));
         {
-            let mapped = slice.get_mapped_range();
+            let mapped = slice
+                .get_mapped_range()
+                .map_err(|e| format!("Readback map failed: {e}"))?;
             for row in 0..height as usize {
                 let start = row * padded as usize;
                 out.extend_from_slice(&mapped[start..start + unpadded as usize]);

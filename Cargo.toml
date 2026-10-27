@@ -1,6 +1,6 @@
 [package]
 name = "moleucle_3dview_rs"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "A lightweight 3D molecule visualization library for egui, rendering through wgpu."
 license = "MIT"
@@ -10,9 +10,9 @@ categories = ["visualization", "science"]
 
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
-eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "wgpu"] }
-egui = "0.35.0"
-egui-wgpu = "0.35.0"
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.37.0"
+egui-wgpu = "0.37.0"
 lin_alg = { version = "1.4.3", features = ["computer_graphics"] }
 
 [dev-dependencies]

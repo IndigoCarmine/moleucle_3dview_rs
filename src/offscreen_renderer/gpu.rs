@@ -383,7 +383,7 @@ fn create_triangle_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
@@ -403,7 +403,7 @@ fn create_triangle_pipeline(
                         shader_location: 2,
                     },
                 ],
-            }],
+            })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -442,7 +442,7 @@ fn create_wire_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
@@ -462,7 +462,7 @@ fn create_wire_pipeline(
                         shader_location: 2,
                     },
                 ],
-            }],
+            })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -547,11 +547,11 @@ fn create_line_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(entry_point),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: instance_stride,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes,
-            }],
+            })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -591,7 +591,7 @@ fn create_circles_pipeline(
             module: shader,
             entry_point: Some("vs_main"),
             buffers: &[
-                wgpu::VertexBufferLayout {
+                Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<CircleQuadVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[wgpu::VertexAttribute {
@@ -599,8 +599,8 @@ fn create_circles_pipeline(
                         offset: 0,
                         shader_location: 0,
                     }],
-                },
-                wgpu::VertexBufferLayout {
+                }),
+                Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<CircleInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
@@ -620,7 +620,7 @@ fn create_circles_pipeline(
                             shader_location: 3,
                         },
                     ],
-                },
+                }),
             ],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
@@ -662,7 +662,7 @@ fn create_bond_pipeline(
             entry_point: Some("vs_main"),
             buffers: &[
                 // Per-vertex unit cylinder geometry.
-                wgpu::VertexBufferLayout {
+                Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<BondMeshVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -677,9 +677,9 @@ fn create_bond_pipeline(
                             shader_location: 1,
                         },
                     ],
-                },
+                }),
                 // Per-bond instance data: mid, radius, axis, length, color.
-                wgpu::VertexBufferLayout {
+                Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<BondInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
@@ -709,7 +709,7 @@ fn create_bond_pipeline(
                             shader_location: 6,
                         },
                     ],
-                },
+                }),
             ],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
