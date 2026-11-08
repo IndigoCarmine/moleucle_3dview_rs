@@ -6,7 +6,7 @@ use crate::{
     camera, offscreen_renderer::LodSettings, Camera, Molecule, MoleculeViewer, OffscreenRenderer,
     RenderStyle,
 };
-use eframe::egui::{self, PointerButton, Sense};
+use eframe::egui::{self, Key, PointerButton, Sense, ViewportCommand};
 use lin_alg::f32::{Mat4, Vec3};
 
 /// Something the user did to the view, drained by the host with
@@ -187,6 +187,87 @@ fn default_camera() -> camera::OrbitalCamera {
     camera
 }
 
+/// Tuning for fly mode (first-person navigation).
+///
+/// Fly mode is toggled with **F** while the pointer is over the view and left
+/// with **Esc** (or **F** again). While it is on, the cursor is hidden and held
+/// in the view, moving the mouse turns the camera in place, **W/A/S/D** move
+/// forward/left/back/right, **Space** (or **Enter**) rises and **Shift+Space** descends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlySettings {
+    /// Allow entering fly mode. Turning this off while flying leaves fly mode.
+    pub enabled: bool,
+    /// Radians of turn per pixel of mouse motion.
+    pub look_sensitivity: f32,
+    /// Movement speed, in multiples of the scene's bounding radius per second.
+    pub move_speed: f32,
+}
+
+impl Default for FlySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            look_sensitivity: 0.003,
+            move_speed: 0.5,
+        }
+    }
+}
+
+/// The camera currently driving the view. Fly mode swaps the orbital camera
+/// for a [`camera::FlyCamera`] and back, converting so the view does not jump.
+enum ActiveCamera {
+    Orbital(camera::OrbitalCamera),
+    Fly {
+        cam: camera::FlyCamera,
+        /// Orbit radius before entering fly mode, restored on the way out.
+        orbit_radius: f32,
+    },
+}
+
+impl ActiveCamera {
+    fn get(&self) -> &dyn Camera {
+        match self {
+            Self::Orbital(cam) => cam,
+            Self::Fly { cam, .. } => cam,
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut dyn Camera {
+        match self {
+            Self::Orbital(cam) => cam,
+            Self::Fly { cam, .. } => cam,
+        }
+    }
+
+    fn is_fly(&self) -> bool {
+        matches!(self, Self::Fly { .. })
+    }
+
+    fn to_fly(&mut self) {
+        if let Self::Orbital(orbital) = self {
+            *self = Self::Fly {
+                cam: camera::FlyCamera::from_orbital(orbital),
+                orbit_radius: orbital.radius,
+            };
+        }
+    }
+
+    fn to_orbital(&mut self) {
+        if let Self::Fly { cam, orbit_radius } = self {
+            *self = Self::Orbital(camera::OrbitalCamera::from_fly(cam, *orbit_radius));
+        }
+    }
+
+    /// The orbital camera, leaving fly mode first if needed.
+    fn orbital_mut(&mut self) -> &mut camera::OrbitalCamera {
+        self.to_orbital();
+        match self {
+            Self::Orbital(cam) => cam,
+            Self::Fly { .. } => unreachable!("just converted to orbital"),
+        }
+    }
+}
+
 /// Everything a hover pick's result depends on.
 ///
 /// Picking is a linear ray test over every atom and every bond, and it runs on
@@ -205,7 +286,11 @@ struct HoverPickKey {
 
 pub struct InteractiveMoleculeViewport {
     viewer: MoleculeViewer,
-    camera: camera::OrbitalCamera,
+    camera: ActiveCamera,
+    fly_settings: FlySettings,
+    /// Whether the cursor is currently hidden and grabbed for fly mode, so the
+    /// grab is released exactly once however fly mode ends.
+    cursor_grabbed: bool,
     offscreen: OffscreenRenderer,
     shared_states: SharedRenderStates,
     /// Events raised during [`Self::show`], waiting to be drained by the host.
@@ -228,7 +313,9 @@ impl InteractiveMoleculeViewport {
 
         Self {
             viewer,
-            camera: default_camera(),
+            camera: ActiveCamera::Orbital(default_camera()),
+            fly_settings: FlySettings::default(),
+            cursor_grabbed: false,
             offscreen,
             shared_states,
             events: Vec::new(),
@@ -307,6 +394,33 @@ impl InteractiveMoleculeViewport {
         self.hovered_atom
     }
 
+    /// Whether fly mode (first-person navigation) is on. See [`FlySettings`].
+    pub fn is_fly_mode(&self) -> bool {
+        self.camera.is_fly()
+    }
+
+    /// Turn fly mode on or off, converting the camera so the view does not
+    /// jump. The cursor is grabbed or released on the next [`Self::show`].
+    /// Turning it on does nothing while [`FlySettings::enabled`] is false.
+    pub fn set_fly_mode(&mut self, on: bool) {
+        if on && self.fly_settings.enabled {
+            self.camera.to_fly();
+        } else if !on {
+            self.camera.to_orbital();
+        }
+    }
+
+    pub fn fly_settings(&self) -> FlySettings {
+        self.fly_settings
+    }
+
+    pub fn set_fly_settings(&mut self, settings: FlySettings) {
+        self.fly_settings = settings;
+        if !settings.enabled {
+            self.camera.to_orbital();
+        }
+    }
+
     pub fn selected_atoms(&self) -> Vec<usize> {
         crate::render_state::with_state_by_type::<SelectedAtomRenderState, _>(
             &self.shared_states,
@@ -368,8 +482,9 @@ impl InteractiveMoleculeViewport {
             radius += reach;
         }
 
-        self.camera.center = center;
-        self.camera.radius = radius.max(1e-3) * 2.0;
+        let orbital = self.camera.orbital_mut();
+        orbital.center = center;
+        orbital.radius = radius.max(1e-3) * 2.0;
     }
 
     /// Refit the camera's near/far planes to the whole scene, so distant atoms
@@ -381,7 +496,7 @@ impl InteractiveMoleculeViewport {
             self.viewer.revision(),
             self.viewer.periodic_images(),
         ) {
-            self.camera.fit_clip_planes(center, radius);
+            self.camera.get_mut().fit_clip_planes(center, radius);
         }
     }
 
@@ -500,13 +615,13 @@ impl InteractiveMoleculeViewport {
 
         self.fit_clip_planes();
         let view_proj = {
-            let base = self.camera.view_projection();
+            let base = self.camera.get().view_projection();
             match request.region {
                 Some(region) => (region_crop_matrix(region) * base).data,
                 None => base.data,
             }
         };
-        let cam_rot = self.camera.camera_rotation();
+        let cam_rot = self.camera.get().camera_rotation();
         let camera_right = cam_rot.rotate_vec(Vec3::new(1.0, 0.0, 0.0));
         let camera_up = cam_rot.rotate_vec(Vec3::new(0.0, 1.0, 0.0));
         let camera_forward = cam_rot.rotate_vec(Vec3::new(0.0, 0.0, 1.0));
@@ -517,8 +632,8 @@ impl InteractiveMoleculeViewport {
         let frame = RenderFrameState::new(
             self.viewer.molecule.as_ref(),
             view_proj,
-            Some(self.camera.position()),
-            self.camera.fov_y(),
+            Some(self.camera.get().position()),
+            self.camera.get().fov_y(),
             camera_right,
             camera_up,
             camera_forward,
@@ -578,13 +693,14 @@ impl InteractiveMoleculeViewport {
         let width = available.x.max(1.0) as u32;
         let height = available.y.max(1.0) as u32;
         self.camera
+            .get_mut()
             .set_aspect(width as f32 / height as f32);
 
         // `center()` is an O(atoms) fold, so only pay it when the LOD worker is
         // actually going to use the distance.
         if self.offscreen.lod_enabled() {
             if let Some(molecule) = self.viewer.molecule.as_ref() {
-                let camera_position = self.camera.position();
+                let camera_position = self.camera.get().position();
                 let distance = (camera_position - molecule.center()).magnitude();
                 self.offscreen.submit_lod_distance(distance);
             }
@@ -594,8 +710,8 @@ impl InteractiveMoleculeViewport {
             .ensure_resources(render_state, width, height)?;
 
         self.fit_clip_planes();
-        let view_proj = self.camera.view_projection().data;
-        let cam_rot = self.camera.camera_rotation();
+        let view_proj = self.camera.get().view_projection().data;
+        let cam_rot = self.camera.get().camera_rotation();
         let camera_right = cam_rot.rotate_vec(Vec3::new(1.0, 0.0, 0.0));
         let camera_up = cam_rot.rotate_vec(Vec3::new(0.0, 1.0, 0.0));
         let camera_forward = cam_rot.rotate_vec(Vec3::new(0.0, 0.0, 1.0));
@@ -603,8 +719,8 @@ impl InteractiveMoleculeViewport {
         let frame = RenderFrameState::new(
             self.viewer.molecule.as_ref(),
             view_proj,
-            Some(self.camera.position()),
-            self.camera.fov_y(),
+            Some(self.camera.get().position()),
+            self.camera.get().fov_y(),
             camera_right,
             camera_up,
             camera_forward,
@@ -646,7 +762,7 @@ impl InteractiveMoleculeViewport {
 
     /// Key describing everything the hover pick at `pointer` depends on.
     fn hover_pick_key(&self, pointer: egui::Pos2) -> HoverPickKey {
-        let view_proj = self.camera.view_projection().data;
+        let view_proj = self.camera.get().view_projection().data;
         let mut view_proj_bits = [0u32; 16];
         for (dst, src) in view_proj_bits.iter_mut().zip(view_proj.iter()) {
             *dst = src.to_bits();
@@ -659,10 +775,129 @@ impl InteractiveMoleculeViewport {
         }
     }
 
+    /// Enter/leave fly mode and, while it is on, steer the fly camera.
+    /// Returns whether fly mode is on after this frame's input.
+    fn handle_fly(&mut self, ctx: &egui::Context, response: &egui::Response) -> bool {
+        let typing = ctx.egui_wants_keyboard_input() && !self.cursor_grabbed;
+        let (toggle, escape, window_focused) = ctx.input(|i| {
+            (
+                i.modifiers.is_none() && i.key_pressed(Key::F),
+                i.key_pressed(Key::Escape),
+                i.focused,
+            )
+        });
+
+        if self.camera.is_fly() {
+            if toggle || escape || !window_focused || !self.fly_settings.enabled {
+                self.camera.to_orbital();
+            }
+        } else if toggle && response.hovered() && !typing && self.fly_settings.enabled {
+            self.camera.to_fly();
+        }
+
+        self.sync_cursor_grab(ctx, response);
+        if !self.camera.is_fly() {
+            return false;
+        }
+
+        // Speed scales with the scene so a small molecule and a big solvated
+        // box take the same time to cross.
+        let scene_radius = self
+            .offscreen
+            .scene_bounding_sphere(
+                self.viewer.molecule.as_ref(),
+                self.viewer.revision(),
+                self.viewer.periodic_images(),
+            )
+            .map(|(_, radius)| radius)
+            .filter(|r| r.is_finite() && *r > 1e-3);
+
+        let settings = self.fly_settings;
+        let ActiveCamera::Fly { cam, orbit_radius } = &mut self.camera else {
+            return false;
+        };
+        let speed = settings.move_speed * scene_radius.unwrap_or(*orbit_radius);
+
+        let (motion, dt, step) = ctx.input(|i| {
+            let mut step = Vec3::new_zero();
+            if i.key_down(Key::W) {
+                step.z += 1.0;
+            }
+            if i.key_down(Key::S) {
+                step.z -= 1.0;
+            }
+            if i.key_down(Key::D) {
+                step.x += 1.0;
+            }
+            if i.key_down(Key::A) {
+                step.x -= 1.0;
+            }
+            if i.key_down(Key::Space) {
+                // Shift+Space descends, plain Space rises.
+                step.y += if i.modifiers.shift { -1.0 } else { 1.0 };
+            } else if i.key_down(Key::Enter) {
+                step.y += 1.0;
+            }
+            // `motion` is raw device movement, so recentring the cursor below
+            // does not feed back into the look direction.
+            (i.pointer.motion(), i.stable_dt.min(0.1), step)
+        });
+
+        if let Some(m) = motion {
+            cam.look(m.x * settings.look_sensitivity, m.y * settings.look_sensitivity);
+        }
+        if step.magnitude() > 0.0 {
+            cam.translate_local(step.to_normalized() * (speed * dt));
+        }
+        true
+    }
+
+    /// Hide and hold the cursor while fly mode is on; restore it once fly mode
+    /// ends, whichever way it ended.
+    fn sync_cursor_grab(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        let want = self.camera.is_fly();
+        if want != self.cursor_grabbed {
+            if want {
+                // winit: Windows/X11 support only `Confined`, macOS only `Locked`.
+                let grab = if cfg!(target_os = "macos") {
+                    egui::CursorGrab::Locked
+                } else {
+                    egui::CursorGrab::Confined
+                };
+                ctx.send_viewport_cmd(ViewportCommand::CursorGrab(grab));
+                ctx.send_viewport_cmd(ViewportCommand::CursorVisible(false));
+            } else {
+                ctx.send_viewport_cmd(ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                ctx.send_viewport_cmd(ViewportCommand::CursorVisible(true));
+                response.surrender_focus();
+            }
+            self.cursor_grabbed = want;
+        }
+
+        if want {
+            // Keep keyboard focus here so Enter/Space cannot press whatever
+            // button last had focus.
+            response.request_focus();
+            if !cfg!(target_os = "macos") {
+                // A confined cursor still stops at the window edge; recentring
+                // it keeps raw motion coming in every direction.
+                ctx.send_viewport_cmd(ViewportCommand::CursorPosition(response.rect.center()));
+            }
+            // Held keys move the camera even with no input events arriving.
+            ctx.request_repaint();
+        }
+    }
+
     fn handle_interaction(&mut self, ctx: &egui::Context, response: &egui::Response) {
         // Recomputed below whenever the pointer is over the view; leaving the
         // view therefore clears it.
         self.hovered_atom = None;
+
+        // Fly mode owns the mouse and keyboard: no picking, clicking or
+        // orbiting while it is on.
+        if self.handle_fly(ctx, response) {
+            return;
+        }
 
         // Orbiting is not pointing. The hover key includes the camera, so a drag
         // misses the cache on every frame and re-runs the whole ray test --
@@ -682,7 +917,7 @@ impl InteractiveMoleculeViewport {
                     Some((cached_key, picked)) if cached_key == key => picked,
                     _ => {
                         let local = pointer - response.rect.min;
-                        let (ray_origin, ray_dir) = self.camera.ray_from_screen(
+                        let (ray_origin, ray_dir) = self.camera.get().ray_from_screen(
                             local.x,
                             local.y,
                             response.rect.width().max(1.0),
@@ -705,7 +940,7 @@ impl InteractiveMoleculeViewport {
         if response.hovered() {
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > f32::EPSILON {
-                self.camera.dolly(scroll * 0.02);
+                self.camera.get_mut().dolly(scroll * 0.02);
             }
         }
 
@@ -715,9 +950,11 @@ impl InteractiveMoleculeViewport {
             let shift_down = ctx.input(|i| i.modifiers.shift);
             if shift_down {
                 self.camera
+                    .get_mut()
                     .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
             } else {
                 self.camera
+                    .get_mut()
                     .orbit(delta.x * 0.005, delta.y * 0.005);
             }
         }
@@ -727,13 +964,14 @@ impl InteractiveMoleculeViewport {
         {
             let delta = response.drag_delta();
             self.camera
+                .get_mut()
                 .pan(lin_alg::f32::Vec2::new(delta.x * 0.01, delta.y * 0.01));
         }
 
         if response.clicked_by(PointerButton::Primary) {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let local = pointer - response.rect.min;
-                let (ray_origin, ray_dir) = self.camera.ray_from_screen(
+                let (ray_origin, ray_dir) = self.camera.get().ray_from_screen(
                     local.x,
                     local.y,
                     response.rect.width().max(1.0),
