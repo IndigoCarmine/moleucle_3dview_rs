@@ -79,9 +79,51 @@ impl Default for OrbitalCamera {
             fov_y: 45.0f32.to_radians(),
             aspect: 1.0,
             near: 0.1,
-            far: 100.0,
+            // Only a fallback: viewports refit both planes to the scene every
+            // frame with `fit_clip_planes`. Kept generous so a camera used
+            // without that does not silently drop distant geometry.
+            far: 10_000.0,
             last_orbit_axis: Vec3::new(0.0, 0.0, 1.0),
         }
+    }
+}
+
+/// Largest far/near ratio `fit_clip_planes` allows. A 24-bit depth buffer
+/// with a perspective projection loses most of its precision to the region
+/// near the camera; past roughly this ratio the far side starts z-fighting.
+const MAX_CLIP_RATIO: f32 = 1.0e4;
+
+/// Smallest near plane `fit_clip_planes` will set, in scene units (nm).
+const MIN_NEAR: f32 = 1.0e-3;
+
+impl OrbitalCamera {
+    /// Fit the near and far planes around a bounding sphere of the scene, so
+    /// that nothing inside it is clipped however far the camera is from it.
+    ///
+    /// From outside the sphere both planes hug it, which spends the depth
+    /// buffer's precision on the scene alone. Once the camera is inside it,
+    /// the near plane is held at `far / MAX_CLIP_RATIO`, so the depth range
+    /// stays usable while geometry right in front of the camera still shows.
+    pub fn fit_clip_planes(&mut self, center: Vec3, radius: f32) {
+        let radius = if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            0.0
+        };
+        let distance = (self.position() - center).magnitude();
+        if !distance.is_finite() {
+            return;
+        }
+
+        // Small slack so geometry exactly on the sphere is not clipped by
+        // rounding.
+        let far = (distance + radius) * 1.02 + 0.01;
+        let near = ((distance - radius) * 0.98)
+            .max(far / MAX_CLIP_RATIO)
+            .max(MIN_NEAR);
+
+        self.far = far.max(near * 2.0);
+        self.near = near;
     }
 }
 

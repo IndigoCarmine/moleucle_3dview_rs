@@ -69,3 +69,44 @@ fn test_ray_cast_default() {
     assert!((dir.y - 0.0).abs() < 1e-5);
     assert!((dir.z - 1.0).abs() < 1e-5);
 }
+
+/// Project a world point and report whether it lies inside the depth range.
+fn inside_depth_range(cam: &OrbitalCamera, p: Vec3) -> bool {
+    let m = cam.view_projection().data;
+    // Column-major: clip = M * (p, 1).
+    let z = m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14];
+    let w = m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15];
+    w > 0.0 && z >= 0.0 && z <= w
+}
+
+#[test]
+fn fit_clip_planes_keeps_a_distant_scene_inside_the_depth_range() {
+    let mut cam = OrbitalCamera::default();
+    // A 500 nm system framed from 1000 nm away: far past the old fixed
+    // 100 nm far plane.
+    cam.center = Vec3::new_zero();
+    cam.radius = 1000.0;
+    cam.fit_clip_planes(Vec3::new_zero(), 500.0);
+
+    let forward = cam.target() - cam.position();
+    let forward = forward / forward.magnitude();
+    let nearest = cam.target() - forward * 499.0;
+    let farthest = cam.target() + forward * 499.0;
+    assert!(inside_depth_range(&cam, nearest));
+    assert!(inside_depth_range(&cam, farthest));
+    assert!(cam.near < cam.far);
+}
+
+#[test]
+fn fit_clip_planes_inside_the_scene_keeps_a_usable_depth_ratio() {
+    let mut cam = OrbitalCamera::default();
+    cam.center = Vec3::new_zero();
+    cam.radius = 1.0;
+    cam.fit_clip_planes(Vec3::new_zero(), 200.0);
+
+    assert!(cam.near > 0.0);
+    assert!(cam.far / cam.near <= 1.0e4 * 1.0001);
+    let forward = cam.target() - cam.position();
+    let forward = forward / forward.magnitude();
+    assert!(inside_depth_range(&cam, cam.position() + forward * 199.0));
+}
