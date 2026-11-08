@@ -372,6 +372,19 @@ impl InteractiveMoleculeViewport {
         self.camera.radius = radius.max(1e-3) * 2.0;
     }
 
+    /// Refit the camera's near/far planes to the whole scene, so distant atoms
+    /// are never clipped by a fixed far plane. Leaves the planes alone when
+    /// there is nothing to draw.
+    fn fit_clip_planes(&mut self) {
+        if let Some((center, radius)) = self.offscreen.scene_bounding_sphere(
+            self.viewer.molecule.as_ref(),
+            self.viewer.revision(),
+            self.viewer.periodic_images(),
+        ) {
+            self.camera.fit_clip_planes(center, radius);
+        }
+    }
+
     pub fn set_state_by_type<T: 'static + Send + Sync>(&mut self, state: T) {
         set_state_by_type(&self.shared_states, state);
     }
@@ -485,6 +498,7 @@ impl InteractiveMoleculeViewport {
             self.offscreen.set_mesh_resolution(resolution);
         }
 
+        self.fit_clip_planes();
         let view_proj = {
             let base = self.camera.view_projection();
             match request.region {
@@ -579,6 +593,7 @@ impl InteractiveMoleculeViewport {
         self.offscreen
             .ensure_resources(render_state, width, height)?;
 
+        self.fit_clip_planes();
         let view_proj = self.camera.view_projection().data;
         let cam_rot = self.camera.camera_rotation();
         let camera_right = cam_rot.rotate_vec(Vec3::new(1.0, 0.0, 0.0));

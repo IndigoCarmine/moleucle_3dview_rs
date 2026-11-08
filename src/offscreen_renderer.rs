@@ -1423,12 +1423,49 @@ impl OffscreenRenderer {
     /// The molecule half is cached against the geometry revision: it is
     /// O(atoms), and this runs every frame.
     fn frame_bounding_sphere(&mut self, frame: &RenderFrameState<'_>) -> Option<(Vec3, f32)> {
+        self.bounding_sphere(frame.molecule, frame.geometry_revision)
+    }
+
+    /// A sphere containing everything the whole scene draws: every periodic
+    /// image of the molecule plus the overlays.
+    ///
+    /// The camera fits its near/far clip planes to this, so nothing on screen
+    /// is clipped away for being far from the camera. Overlay bounds come from
+    /// the batches built by the *previous* render; they are rebuilt every
+    /// frame, so they lag by at most one frame.
+    pub(crate) fn scene_bounding_sphere(
+        &mut self,
+        molecule: Option<&Molecule>,
+        geometry_revision: u64,
+        periodic_images: Option<&crate::PeriodicImages>,
+    ) -> Option<(Vec3, f32)> {
+        let (center, radius) = self.bounding_sphere(molecule, geometry_revision)?;
+        // Each image is the primary cell rigidly translated, so the tiling's
+        // extent is the primary radius plus the farthest translation.
+        let reach = periodic_images
+            .map(|images| {
+                images
+                    .translations()
+                    .map(|t| t.magnitude())
+                    .fold(0.0_f32, f32::max)
+            })
+            .unwrap_or(0.0);
+        Some((center, radius + reach))
+    }
+
+    /// See [`Self::frame_bounding_sphere`]; this is its body, taking only what
+    /// it reads so it can run without a [`RenderFrameState`].
+    fn bounding_sphere(
+        &mut self,
+        molecule: Option<&Molecule>,
+        geometry_revision: u64,
+    ) -> Option<(Vec3, f32)> {
         let molecule_bounds = match self.molecule_bounds {
-            Some((revision, center, radius)) if revision == frame.geometry_revision => {
+            Some((revision, center, radius)) if revision == geometry_revision => {
                 Some((center, radius))
             }
             _ => {
-                let measured = frame.molecule.and_then(|mol| {
+                let measured = molecule.and_then(|mol| {
                     let (min, max) = bounds_of(mol.atoms.iter().map(|atom| atom.position))?;
                     let center = (min + max) * 0.5;
                     // Pad by the largest radius any style would draw, so the
@@ -1441,8 +1478,8 @@ impl OffscreenRenderer {
                         .fold(0.0_f32, f32::max);
                     Some((center, (max - center).magnitude() + padding))
                 });
-                self.molecule_bounds = measured
-                    .map(|(center, radius)| (frame.geometry_revision, center, radius));
+                self.molecule_bounds =
+                    measured.map(|(center, radius)| (geometry_revision, center, radius));
                 measured
             }
         };
