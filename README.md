@@ -25,6 +25,11 @@ is just another widget inside an ordinary egui layout, not a separate window.
 - **Partial visibility**: `set_visible_atoms` hides atoms and their bonds
   without renumbering anything, so a host showing a subset does not have to
   maintain a parallel index space.
+- **Two camera modes**: orbit (drag to rotate, wheel to zoom, Shift/right drag
+  to pan) and a first-person fly mode (`FlyCamera`). Press **F** over the view to
+  fly: the cursor is grabbed, moving the mouse turns the camera, **W/A/S/D** move,
+  **Space** (or **Enter**) rises, **Shift+Space** descends, and **Esc** returns to orbiting
+  without the view jumping. Tune or disable it with `FlySettings`.
 - **Level of detail**: an optional background worker lowers mesh resolution with
   camera distance (`LodSettings`).
 - **Transparency**: per-molecule opacity and per-atom RGBA, drawn in a two-phase

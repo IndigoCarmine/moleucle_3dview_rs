@@ -35,6 +35,15 @@
 //! # }
 //! ```
 //!
+//! # Controls
+//!
+//! By default the viewport orbits: drag to rotate, scroll to zoom, Shift+drag
+//! or right/middle drag to pan, click to pick an atom. Pressing **F** over the
+//! view switches to fly mode ([`FlyCamera`]): the cursor is grabbed, mouse
+//! motion turns the camera in place, **W/A/S/D** move, **Space** (or **Enter**) rises and
+//! **Shift+Space** descends. **Esc** (or **F**) returns to orbiting. See
+//! [`FlySettings`].
+//!
 //! [`MoleculeViewer`] is the lower-level piece the viewport is built on — the
 //! molecule, its appearance overrides and CPU ray picking, with no egui or
 //! camera involvement. Reach for it only when driving [`OffscreenRenderer`]
@@ -71,7 +80,7 @@ pub mod viewport;
 
 pub use additional_render::{AdditionalRender, GpuPipeline};
 pub use atom_radii::{ball_stick_radius, default_ball_stick_bond_radius, vdw_radius};
-pub use camera::{Camera, OrbitalCamera};
+pub use camera::{Camera, FlyCamera, OrbitalCamera};
 pub use frame_state::{RenderFrameState, DEFAULT_CLEAR_COLOR};
 pub use molecule::{
     Atom, AtomMeta, AtomRecord, Bond, Element, Molecule, MoleculeBuilder, SymbolId, SymbolTable,
@@ -91,5 +100,5 @@ pub use render_state::{
 pub use scene_types::{Entity, Mesh, Scene};
 pub use viewer::{default_color_fn, ColorFn, MoleculeViewer};
 pub use viewport::{
-    ExportedImage, ImageExportRequest, InteractiveMoleculeViewport, ViewPortEvent,
+    ExportedImage, FlySettings, ImageExportRequest, InteractiveMoleculeViewport, ViewPortEvent,
 };
