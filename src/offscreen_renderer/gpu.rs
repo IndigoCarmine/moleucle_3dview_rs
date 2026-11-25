@@ -231,7 +231,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-shader"),
-        source: wgpu::ShaderSource::Wgsl(MESH_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(lit(MESH_SHADER).into()),
     });
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -289,7 +289,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
 
     let circles_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-circles-shader"),
-        source: wgpu::ShaderSource::Wgsl(CIRCLES_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(lit(CIRCLES_SHADER).into()),
     });
     let circles_pipeline = pipeline_set("offscreen-circles-pipeline", |label, depth_write| {
         create_circles_pipeline(device, &layout, &circles_shader, label, depth_write)
@@ -310,7 +310,7 @@ pub(super) fn create_gpu_resources(device: &wgpu::Device) -> GpuResources {
 
     let bond_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("offscreen-bond-shader"),
-        source: wgpu::ShaderSource::Wgsl(BOND_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(lit(BOND_SHADER).into()),
     });
     let bond_pipeline = pipeline_set("offscreen-bond-pipeline", |label, depth_write| {
         create_bond_pipeline(device, &layout, &bond_shader, label, depth_write)
@@ -737,12 +737,18 @@ fn create_bond_pipeline(
     })
 }
 
+/// A lit shader's source with the shared camera-following lighting
+/// (`light_view_normal`, `light_shade`) appended; see [`crate::lighting`].
+fn lit(shader: &str) -> String {
+    format!("{shader}
+{}", crate::lighting::wgsl())
+}
+
 const MESH_SHADER: &str = r#"
 struct VSOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) depth01: f32,
 };
 
 struct Uniforms {
@@ -779,42 +785,18 @@ fn vs_main(
     out.position = clip;
     out.color = color;
     out.normal = normal;
-    out.depth01 = clip.z / clip.w * 0.5 + 0.5;
     return out;
 }
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let base = in.color.rgb;
-    let n = normalize(in.normal);
-    // Camera-relative key light — see the note in CIRCLES_SHADER: a world-fixed
-    // direction made brightness depend on which way the camera happened to face.
-    let l = normalize(
-        uniforms.camera_right.xyz * 0.4
-        + uniforms.camera_up.xyz * 0.6
-        - uniforms.camera_forward.xyz
-    );
-    let diffuse = max(dot(n, l), 0.0);
-    let ambient = 0.22;
-    let standard_lit = base * (ambient + 0.78 * diffuse);
-
-    // For deeper fragments, blend toward a sphere-like radial tone.
-    let depth01 = clamp(in.depth01, 0.0, 1.0);
-    let deep_factor = smoothstep(0.60, 0.98, depth01);
-    let radial = clamp(n.z * 0.5 + 0.5, 0.0, 1.0);
-
-    let core = base * 1.05 + vec3<f32>(0.10, 0.10, 0.10);
-    let mid = base;
-    let edge = base * 0.28;
-    let center_mix = smoothstep(0.55, 1.0, radial);
-    let radial_mix = smoothstep(0.05, 0.85, radial);
-    var sphere_tone = mix(edge, mix(mid, core, center_mix), radial_mix);
-
-    // Darker rim to emulate the sample's white->base->black feel.
-    let rim = mix(0.72, 1.0, smoothstep(0.0, 0.55, radial));
-    sphere_tone = sphere_tone * rim;
-
-    let lit = mix(standard_lit, sphere_tone, deep_factor);
+    // Lit in view space (see `src/lighting.rs`), so the side facing the camera
+    // is the lit side however the model is turned. This used to blend almost
+    // every fragment (all but the nearest few percent of the depth range)
+    // towards a tone from the *world* z of the normal, which left the
+    // camera-facing side of every ball dark from half the orbits, the default
+    // view among them.
+    let lit = light_shade(in.color.rgb, light_view_normal(in.normal));
     return vec4<f32>(lit, in.color.a);
 }
 "#;
@@ -1087,25 +1069,9 @@ fn fs_main(in: VSOut) -> FSOut {
     out.depth =
         clip.z / clip.w * 0.5 + 0.5;
 
-    // Key light fixed relative to the camera rather than the world. A
-    // world-fixed direction leaves the camera-facing hemisphere unlit over half
-    // of all orbits, collapsing everything to `ambient` — mean brightness
-    // measured 3.4x apart between camera angles, and the default view happened
-    // to be one of the dark ones. Offset up and to the right of the viewer so
-    // spheres still shade across their face instead of reading as flat discs.
-    let light_dir = normalize(
-        uniforms.camera_right.xyz * 0.4
-        + uniforms.camera_up.xyz * 0.6
-        - uniforms.camera_forward.xyz
-    );
-
-    let diffuse =
-        max(dot(world_normal, light_dir), 0.0);
-
-    let ambient = 0.15;
-
-    let lit =
-        in.color.rgb * (ambient + diffuse * 0.85);
+    // Lit in view space (see `src/lighting.rs`). `normal` is already the
+    // impostor's view-space normal: x right, y up, z towards the viewer.
+    let lit = light_shade(in.color.rgb, normal);
 
     out.color = vec4<f32>(lit, in.color.a);
 
@@ -1181,17 +1147,9 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    // Camera-relative key light, matching the atom shaders so bonds and the
-    // spheres they join are lit from the same side.
-    let l = normalize(
-        uniforms.camera_right.xyz * 0.4
-        + uniforms.camera_up.xyz * 0.6
-        - uniforms.camera_forward.xyz
-    );
-    let diffuse = max(dot(n, l), 0.0);
-    let ambient = 0.25;
-    return vec4<f32>(in.color.rgb * (ambient + 0.75 * diffuse), in.color.a);
+    // The same camera-following lighting as the atoms (see `src/lighting.rs`).
+    let lit = light_shade(in.color.rgb, light_view_normal(in.normal));
+    return vec4<f32>(lit, in.color.a);
 }
 "#;
 
@@ -1213,10 +1171,10 @@ mod shader_tests {
 
     #[test]
     fn all_wgsl_shaders_compile() {
-        validate("MESH_SHADER", MESH_SHADER);
+        validate("MESH_SHADER", &lit(MESH_SHADER));
         validate("WIRE_SHADER", WIRE_SHADER);
         validate("LINE_SHADER", LINE_SHADER);
-        validate("CIRCLES_SHADER", CIRCLES_SHADER);
-        validate("BOND_SHADER", BOND_SHADER);
+        validate("CIRCLES_SHADER", &lit(CIRCLES_SHADER));
+        validate("BOND_SHADER", &lit(BOND_SHADER));
     }
 }

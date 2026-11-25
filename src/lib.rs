@@ -59,6 +59,7 @@ pub mod atom_radii;
 pub mod camera;
 mod frustum;
 pub mod frame_state;
+pub mod lighting;
 pub mod molecule;
 pub mod offscreen_renderer;
 pub mod overlays;
